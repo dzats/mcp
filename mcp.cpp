@@ -494,9 +494,9 @@ int main(int argc, char **argv)
         i != dst.end(); ++i) {
       char saddr[INET_ADDRSTRLEN];
       uint32_t iaddr = htonl((*i).addr);
-      if (i->filename != NULL) {
+      if (i->filename.size() > 0) {
         DEBUG("%s: %s\n", inet_ntop(AF_INET, &iaddr, saddr, sizeof(saddr)),
-          &*(i->filename));
+          &*(i->filename.c_str()));
       } else {
         DEBUG("%s:\n", inet_ntop(AF_INET, &iaddr, saddr, sizeof(saddr)));
       }

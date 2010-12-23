@@ -8,6 +8,7 @@
 
 #include <pthread.h>
 
+#include <memory>
 #include <vector>
 #include <set>
 #include <map>
@@ -915,27 +916,11 @@ int MulticastSender::session()
     uint8_t *t_curr = (uint8_t *)(nsources_p + 1);
     uint8_t *t_end = targets_message + sizeof(targets_message);
     for (unsigned i = 0; i < targets.size(); ++i) {
-      size_t fname_length;
-      if (targets[i].filename == NULL) {
-        fname_length = 0;
-      } else {
-#ifdef HAS_TR1_MEMORY
-        fname_length = strlen(targets[i].filename.get()); 
-#else
-        fname_length = strlen(targets[i].filename); 
-#endif
-      }
-      unsigned length = sizeof(DestinationHeader) + fname_length;
+      unsigned length = sizeof(DestinationHeader) + targets[i].filename.size();
       if (length > MAX_UDP_PACKET_SIZE - sizeof(MulticastMessageHeader)) {
-#ifdef HAS_TR1_MEMORY
-        ERROR("Filename %s is too long\n", targets[i].filename.get());
+        ERROR("Filename %s is too long\n", targets[i].filename.c_str());
         register_error(STATUS_UNKNOWN_ERROR,
-          "Filename %s is too long", targets[i].filename.get());
-#else
-        ERROR("Filename %s is too long\n", targets[i].filename);
-        register_error(STATUS_UNKNOWN_ERROR,
-          "Filename %s is too long", targets[i].filename);
-#endif
+          "Filename %s is too long", targets[i].filename.c_str());
         pthread_cancel(multicast_delivery_thread);
         //pthread_join(multicast_delivery_thread, NULL)
         return -1;
@@ -946,14 +931,13 @@ int MulticastSender::session()
         t_curr = (uint8_t *)(nsources_p + 1);
       }
       DestinationHeader *h = new(t_curr)
-        DestinationHeader(targets[i].addr, fname_length);
+        DestinationHeader(targets[i].addr, targets[i].filename.size());
       t_curr = (uint8_t *)(h + 1);
-#ifdef HAS_TR1_MEMORY
-      memcpy(t_curr, targets[i].filename.get(), fname_length);
-#else
-      memcpy(t_curr, targets[i].filename, fname_length);
-#endif
-      t_curr += fname_length;
+      if (targets[i].filename.size() > 0) {
+        memcpy(t_curr, targets[i].filename.c_str(),
+          targets[i].filename.size());
+      }
+      t_curr += targets[i].filename.size();
     }
     if (t_curr != (uint8_t *)(nsources_p + 1)) {
       mcast_send(targets_message, t_curr - targets_message);

@@ -22,6 +22,7 @@
 #include <machine/atomic.h>
 #endif
 
+#include <memory>
 #include <vector>
 #include <set>
 #include <functional>

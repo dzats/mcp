@@ -36,16 +36,15 @@ void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException)
 }
 
 // Send the Unicast Session Initialization record
-void UnicastSender::send_initial_record(int n_sources, char *path,
+void UnicastSender::send_initial_record(int n_sources, const std::string path,
     MD5sum *checksum) throw (ConnectionException)
 {
-  uint32_t path_len = path == NULL ? 0 : strlen(path);
-  UnicastSessionHeader ush(flags, n_sources, path_len);
+  UnicastSessionHeader ush(flags, n_sources, path.size());
   sendn(sock, &ush, sizeof(ush), 0);
   checksum->update(&ush, sizeof(ush));
-  if (path_len > 0) {
-    sendn(sock, path, path_len, 0);
-    checksum->update(path, path_len);
+  if (path.size() > 0) {
+    sendn(sock, path.data(), path.size(), 0);
+    checksum->update(path.data(), path.size());
   }
 }
 
@@ -56,22 +55,13 @@ void UnicastSender::send_destinations(
     MD5sum *checksum) throw (ConnectionException)
 {
   for(; i != _end; ++i) {
-#ifdef HAS_TR1_MEMORY
-    int path_len = &*i->filename == NULL ? 0 : strlen(i->filename.get());
-#else
-    int path_len = i->filename == NULL ? 0 : strlen(i->filename);
-#endif
+    int path_len = i->filename.size();
     DestinationHeader dh(i->addr, path_len);
     sendn(sock, &dh, sizeof(dh), 0);
     checksum->update(&dh, sizeof(dh));
     if (path_len > 0) {
-#ifdef HAS_TR1_MEMORY
-      sendn(sock, i->filename.get(), path_len, 0);
-      checksum->update(i->filename.get(), path_len);
-#else
-      sendn(sock, i->filename, path_len, 0);
-      checksum->update(i->filename, path_len);
-#endif
+      sendn(sock, i->filename.c_str(), path_len, 0);
+      checksum->update(i->filename.c_str(), path_len);
     }
   }
 }
@@ -231,13 +221,8 @@ uint8_t UnicastSender::session_init(const std::vector<Destination>& dst,
     do {
       MD5sum checksum;
       is_retransmission_required = false;
-#ifdef HAS_TR1_MEMORY
-      send_initial_record(n_sources, dst[destination_index].filename.get(),
+      send_initial_record(n_sources, dst[destination_index].filename.c_str(),
         &checksum);
-#else
-      send_initial_record(n_sources, dst[destination_index].filename,
-        &checksum);
-#endif
       send_destinations(dst.begin(), dst.begin() + destination_index,
         &checksum);
       if (dst.size() > destination_index + 1) {

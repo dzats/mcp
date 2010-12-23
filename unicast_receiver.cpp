@@ -270,10 +270,8 @@ void UnicastReceiver::get_destinations(MD5sum *checksum)
         printf("%d.", (*i).addr >> 16 & 0xFF);
         printf("%d.", (*i).addr >> 8 & 0xFF);
         printf("%d: ", (*i).addr & 0xFF);
-        if (i->filename != NULL) {
-          printf("%s\n", &*(i->filename));
-        } else {
-          printf("\n");
+        if (i->filename.size() > 0) {
+          printf("%s\n", &*(i->filename.c_str()));
         }
       }
 #endif

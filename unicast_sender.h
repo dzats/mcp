@@ -30,7 +30,7 @@ private:
   // Tries to establish TCP connection with the host 'addr'
   void connect_to(in_addr_t addr) throw (ConnectionException);
   // Send the Unicast Session Initialization record
-  void send_initial_record(int n_sources, char *path,
+  void send_initial_record(int n_sources, const std::string path,
     MD5sum *checksum) throw (ConnectionException);
   // Send the destinations from *i to *_end
   void send_destinations(std::vector<Destination>::const_iterator i,
