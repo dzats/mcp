@@ -140,7 +140,12 @@ int get_local_addresses(int sock, vector<uint32_t> *addresses,
     }
   }
 
+#ifndef linux
   DEBUG("Number of interfaces: %d(%zu)\n", ifc.ifc_len, sizeof(struct ifreq));
+#else
+  DEBUG("Number of interfaces: %d(%zu)\n",
+		ifc.ifc_len / sizeof(struct ifreq), sizeof(struct ifreq));
+#endif
   for (uint8_t *ptr = (uint8_t *)ifc.ifc_req;
       ptr < (uint8_t *)ifc.ifc_req + ifc.ifc_len;) {
     struct ifreq *ifr = (struct ifreq *)ptr;
