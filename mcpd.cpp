@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -31,16 +32,23 @@
 
 #include "log.h"
 
-#define PORT 6789
-
 #define MAX_FNAME_LENGTH 4096
 
 using namespace std;
 
-void usage() {
-	// FIXME: print the usage information
-	fprintf(stderr, "Usage: ...\n");
-	abort();
+void usage_and_exit(char *name) {
+	printf("Usage:\n%s [options]\n", name);
+	printf("Options:\n"
+	"\t-a address\n"
+	"\t\tSpecify an IP address the server will use. By default, \n"
+	"\t\tserver will accept connections to all the local addresses.\n\n"
+	"\t-p port\n"
+	"\t\tSpecify a TCP port for the server to use instead of\n"
+	"\t\tthe default port (6879).\n\n" 
+	"\t-d\tRun server in the debug mode (don't go to the background,\n"
+	"\t\tlog messages to the standard out/error, and don't fork on\n"
+	"\t\tincoming connection.\n\n");
+	exit(EXIT_FAILURE);
 }
 
 // Wrapper for the FileWriter::session function, passed
@@ -81,25 +89,30 @@ void *multicast_sender(void *arg)
 
 #ifndef NDEBUG
 void sigpipe_handler(int signum) {
-	printf("sigpipe_handler: signal %d received\n", signum);
+	// It is wrong to call printf here
+	DEBUG("sigpipe_handler: signal %d received\n", signum);
 }
 #endif
 
-int main(int argc, char **argv) {
-#ifndef NDEBUG
-	// Set SIGPIPE handler for debugging
-	signal(SIGPIPE, sigpipe_handler);
-#else
-	signal(SIGPIPE, SIG_IGN);
-#endif
+// The SIGCHLD handler, simply removes zombies
+void sigchld_handler(int signum) {
+	// Remove zombies
+	register int pid;
+	while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
+		// It is wrong to call printf here
+		DEBUG("Child %d picked up\n", pid);
+	};
+}
 
+int main(int argc, char **argv) {
 	// Server configurations
 	in_addr_t address = INADDR_ANY;
-	uint16_t port = PORT;
+	uint16_t port = UNICAST_PORT;
+	bool debug_mode = false;
 
 	// Parse the command line options
 	int ch;
-	while ((ch = getopt(argc, argv, "a:p:h")) != -1 ) {
+	while ((ch = getopt(argc, argv, "a:p:dh")) != -1 ) {
 		switch (ch) {
 			case 'a': // Address specified
 				if ((address = inet_addr(optarg)) == INADDR_NONE) {
@@ -113,9 +126,36 @@ int main(int argc, char **argv) {
 					exit(EXIT_FAILURE);
 				}
 				break;
+			case 'd': // Debug mode: don't go to the background, perform a
+				// simple server rather that forked
+				debug_mode = true;
+				break;
 			default:
-				usage();
+				usage_and_exit(argv[0]);
 		}
+	}
+
+#ifndef NDEBUG
+	// Set SIGPIPE handler for debugging
+	struct sigaction sigpipe_action;
+	memset(&sigpipe_action, 0, sizeof(sigpipe_action));
+	sigpipe_action.sa_handler = sigpipe_handler;
+	sigpipe_action.sa_flags = SA_RESTART;
+	if (sigaction(SIGPIPE, &sigpipe_action, NULL)) {
+		ERROR("sigaction: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+#else
+	signal(SIGPIPE, SIG_IGN);
+#endif
+
+	struct sigaction sigchld_action;
+	memset(&sigchld_action, 0, sizeof(sigchld_action));
+	sigchld_action.sa_handler = sigchld_handler;
+	sigchld_action.sa_flags = SA_RESTART;
+	if (sigaction(SIGCHLD, &sigchld_action, NULL)) {
+		ERROR("sigaction: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
 	}
 
 	// Creates the socket to listen
@@ -147,6 +187,17 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
+	// Become a daemon process and proceeed to the home directory
+	if (!debug_mode) {
+		daemon(1, 1);
+		char *homedir;
+		if ((homedir = getenv("HOME")) == NULL ||
+			chdir(homedir) != 0) {
+			ERROR("Can't proceed to the home directory: %s\n", strerror(errno));
+			// continue execution
+		}
+	}
+
 	// The main server routine
 	while (1) {
 		struct sockaddr_in client_addr;
@@ -154,9 +205,25 @@ int main(int argc, char **argv) {
 		int client_sock = accept(sock, (struct sockaddr *)&client_addr,
 			&client_addr_size);
 		if (client_sock < 0) {
-			ERROR("accept call failed: %s", strerror(errno));
+			ERROR("accept call failed: %s\n", strerror(errno));
 			exit(EXIT_FAILURE);
 		} else {
+			if (!debug_mode) {
+				// Implement the forked server
+				pid_t pid = fork();
+				if (pid > 0) {
+					// Parent process
+					close(client_sock);
+					// Return to the accept call
+					continue;
+				} else if (pid == 0) {
+					close(sock);
+					// execute the main routine
+				} else {
+					ERROR("fork: %s\n", strerror(errno));
+					exit(EXIT_FAILURE);
+				}
+			}
 			// TODO: When the code will be stable enough implement the
 			// forked server here.
 #ifndef NDEBUG
@@ -186,7 +253,7 @@ int main(int argc, char **argv) {
 			// Run the unicast sender sender
 			if (socket_reader->dst.size() > 0) {
 				usender_started = true;
-				UnicastSender *unicast_sender = new UnicastSender(buff);
+				UnicastSender *unicast_sender = new UnicastSender(buff, port);
 				SDEBUG("Initialize the unicast sender thread\n");
 				int retval;
 				if ((retval = unicast_sender->session_init(socket_reader->dst,
@@ -256,6 +323,9 @@ int main(int argc, char **argv) {
 			delete socket_reader;
 			delete buff;
 			close(client_sock);
+			if (!debug_mode) {
+				exit(EXIT_SUCCESS);
+			}
 		}
 	}
 }

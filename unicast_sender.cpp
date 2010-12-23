@@ -19,7 +19,7 @@ void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException) {
 
 	struct sockaddr_in saddr;
 	saddr.sin_family = AF_INET;
-	saddr.sin_port = htons(DEFAULT_PORT);
+	saddr.sin_port = htons(port);
 	saddr.sin_addr.s_addr = htonl(addr);
 
 	if (connect(sock, (struct sockaddr *)&saddr, sizeof(saddr)) != 0) {

@@ -30,9 +30,15 @@ using namespace std;
 #include "unicast_sender.h"
 #include "log.h"
 
-void usage_and_exit() {
-	// TODO: print the usage instructions
-	fprintf(stderr, "Usage: ...\n");
+void usage_and_exit(char *name) {
+	printf("Usage:\n");
+	printf("%s [options] file server1[:location1] [...]\n", name);
+	printf("%s [options] file1 [...] \\; server1[:location1] [...]\n", name);
+	printf("Options:\n"
+	"\t-p port\n"
+	"\t\tSpecify a TCP port for the unicast connections.\n"
+	"\t\tThe default port is 6879.\n\n" 
+	"\t-o\tPreserve the specified servers order during pipelined transfert.\n\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -153,30 +159,39 @@ static char *prepare_to_basename(char *path) {
 
 int main(int argc, char **argv) {
 	// Options
+	char *prog_name = argv[0];
 	bool preserve_order = false; // Don't change order of the destinations
 	// TODO: realize behavior defined by the following flag
 	bool overwrite_files = true; // Overwrite read-only files
+	uint16_t unicast_port = UNICAST_PORT; // TCP port used for unicast connections
 
 	// Parse the command options
 	int ch;
-	while ((ch = getopt(argc, argv, "oh")) != -1) {
+	while ((ch = getopt(argc, argv, "p:oh")) != -1) {
 		switch (ch) {
+			case 'p': // Port specified
+				if ((unicast_port = atoi(optarg)) == 0) {
+					ERROR("Invalid port: %s\n", optarg);
+					exit(EXIT_FAILURE);
+				}
+				break;
 			case 'o': // Preserve order during pipe transfert (don't
 				// sort destinations)
 				preserve_order = true;
 				break;
 			case 'n': // Don't overwrite files, if they are already exist
+				// TODO: implement this functionality
 				overwrite_files = false;
 				break;
 			default:
-				usage_and_exit();
+				usage_and_exit(prog_name);
 		}
 	}
 	argc -= optind;
 	argv += optind;
 
 	if (argc < 2) {
-		usage_and_exit();
+		usage_and_exit(prog_name);
 	}
 
 	// Look for the delimiter symbol
@@ -191,7 +206,7 @@ int main(int argc, char **argv) {
 	if (nsources < 1) {
 		fprintf(stderr, "You should specify at least one source file "
 			"or directory.\n");
-		usage_and_exit();
+		usage_and_exit(prog_name);
 	}
 
 	// Get the sources' names from the arguments
@@ -250,7 +265,7 @@ int main(int argc, char **argv) {
 
 	if (dst.size() == 0) {
 		fprintf(stderr, "You should specify at least one destination.\n");
-		usage_and_exit();
+		usage_and_exit(prog_name);
 	}
 	
 	// Sort the destinations in attempt to achive a better order for
@@ -285,7 +300,7 @@ int main(int argc, char **argv) {
 	// The main objects
 	Distributor *buff = new Distributor();
 	Reader *source_reader = new Reader(buff);
-	UnicastSender *unicast_sender = new UnicastSender(buff);
+	UnicastSender *unicast_sender = new UnicastSender(buff, unicast_port);
 
 	Reader::ThreadArgs freader_args = {source_reader, filenames};
 

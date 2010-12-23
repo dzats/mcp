@@ -284,11 +284,11 @@ void Reader::handle_directory_with_content(char *name,
 
 	// Condition for the case if someone wish to copy the root directory
 	if (*(name + rootdir_basename_offset) != '\0') {
-		DEBUG("Send directory: %s", name + rootdir_basename_offset);
+		DEBUG("Send directory: %s\n", name + rootdir_basename_offset);
 		handle_directory(name, statp, rootdir_basename_offset);
 		// to count one more slash
 	} else {
-		DEBUG("Send the '/' directory (nsources == %d)", nsources);
+		DEBUG("Send the '/' directory (nsources == %d)\n", nsources);
 		// FIXME: need to figure out something for command ./mcp / img000:y
 		// skip additional shash beween the root directory and its subdirectory
 		++rootdir_basename_offset;
@@ -302,7 +302,7 @@ void Reader::handle_directory_with_content(char *name,
 		if ((dirp = opendir(dirname)) == NULL) {
 			// Errors are allowed here (EACCES) for example, but these
 			// errors should be reported about.
-			ERROR("%s: %s", dirname, strerror(errno));
+			ERROR("%s: %s\n", dirname, strerror(errno));
 			continue;
 		}
 
@@ -313,7 +313,7 @@ void Reader::handle_directory_with_content(char *name,
 				continue;
 			int path_size = strlen(dirname) + 1 + strlen(dp->d_name) + 1;
 			if (strlen(dirname) + 1 + strlen(dp->d_name) > MAXPATHLEN) {
-				ERROR("%s/%s: name is too long", dirname, dp->d_name);
+				ERROR("%s/%s: name is too long\n", dirname, dp->d_name);
 				continue;
 			}
 
@@ -326,12 +326,12 @@ void Reader::handle_directory_with_content(char *name,
 				continue;
 			}
 			if (S_ISDIR(tstat.st_mode)) {
-				DEBUG("Send directory: %s", path + rootdir_basename_offset);
+				DEBUG("Send directory: %s\n", path + rootdir_basename_offset);
 				handle_directory(path, statp, rootdir_basename_offset);
 				// add directory to the stack
 				dirs.push(strdup(path));
 			} else if (S_ISREG(tstat.st_mode)) {
-				DEBUG("Send file: %s", path + rootdir_basename_offset);
+				DEBUG("Send file: %s\n", path + rootdir_basename_offset);
 				handle_file(path, &tstat, rootdir_basename_offset, false);
 			} else {
 				// Skip the object if it is not a regular file or directory
@@ -389,7 +389,7 @@ int Reader::get_initial(MD5sum *checksum) throw (ConnectionException) {
 				}
 				path_type = path_is_regular_file;
 			} else {
-				DEBUG("Incorrect path specified\n");
+				SDEBUG("Incorrect path specified\n");
 				register_error(STATUS_DISK_ERROR,
 					"Multiple sources specified, the path can't be a file\n");
 				return -1;

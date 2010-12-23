@@ -14,9 +14,9 @@
 // One socket writer per session
 class UnicastSender : public Distributor::Writer {
 	// configuration constants
-	static const int DEFAULT_PORT = 6789;
 	static const int MAX_INITIALIZATION_RETRIES = 3;
 	int sock;
+	uint16_t port;
 
 	// Tries to establish TCP connection with the host 'addr'
 	void connect_to(in_addr_t addr) throw (ConnectionException);
@@ -38,8 +38,8 @@ public:
 	uint32_t target_address; // address of next immediate destination
 	std::string last_error_message; // Message corresponding to the last error
 
-	UnicastSender(Distributor* b) : Distributor::Writer(b,
-			(Distributor::Client *)&b->unicast_sender), sock(-1) {}
+	UnicastSender(Distributor* b, uint16_t p) : Distributor::Writer(b,
+			(Distributor::Client *)&b->unicast_sender), sock(-1), port(p) {}
 	~UnicastSender() {
 		if (sock != -1) { close(sock); }
 	}

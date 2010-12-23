@@ -16,6 +16,8 @@
 
 #define INLINE inline
 
+#define UNICAST_PORT 6879
+
 // The exception indicating an error in work with TCP connections
 class ConnectionException : public std::exception {
 public:
