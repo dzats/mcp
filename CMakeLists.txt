@@ -25,8 +25,8 @@ PROJECT( mcp )
     multicast_sender.cpp
     unicast_sender.cpp)
 
-  #ADD_DEFINITIONS(-Wall -ggdb -DNDEBUG)
-  ADD_DEFINITIONS(-Wall -ggdb -DNDEBUG -DUSE_MULTICAST)
+  #ADD_DEFINITIONS(-Wall -ggdb -O2 -DNDEBUG)
+  ADD_DEFINITIONS(-Wall -ggdb -O2 -DNDEBUG -DUSE_MULTICAST)
 
   ADD_LIBRARY(mcp_common STATIC ${mcp_common_sources})
   LINK_LIBRARIES(mcp_common pthread)
