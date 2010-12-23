@@ -137,7 +137,8 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
 void* MulticastRecvQueue::get_message(size_t *length)
 {
   pthread_mutex_lock(&mutex);
-  while (n_messages == 0 || n_messages != UINT_MAX && buffer[0]->length == 0) {
+  while (n_messages == 0 ||
+      (n_messages != UINT_MAX && buffer[0]->length == 0)) {
     pthread_cond_wait(&data_ready_cond, &mutex);
   }
 

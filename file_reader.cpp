@@ -88,7 +88,7 @@ uint8_t FileReader::read_sources(char **filenames, int *filename_offsets)
 
 // Reads data from fd (till the end of file) and passes it to
 // the distributor. Returns 0 on success and errno on failure.
-int FileReader::read_from_file(int fd, off_t size)
+int FileReader::read_from_file(int fd, uint64_t size)
 {
   while(size > 0) {
     unsigned count = get_space();

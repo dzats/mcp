@@ -36,14 +36,14 @@ const char* get_targetfile_name(const char *source_name,
     char *filename = (char *)malloc(pathlen + 1 /* slash */ +
       strlen(source_name) + 1);
     memcpy(filename, path, pathlen);
-    char *slash = strchr(source_name, '/');
+    const char *slash = strchr(source_name, '/');
     if (slash == NULL) { abort(); }
     strcpy(filename + pathlen, slash);
     return filename;
   } else {
     assert(path_type == path_is_directory_for_retransmission);
     // Detect the real path type
-    char *p = strchr(source_name, '/');
+    const char *p = strchr(source_name, '/');
     if (p == NULL) { abort(); }
     char *dirname = (char *)malloc(strlen(path) + 1 +
       (UINT32_MAX - n_sources + 1) * (p - source_name));
@@ -102,7 +102,7 @@ const char* get_targetdir_name(const char *source_name,
     char *dirname = (char *)malloc(pathlen + 1 /* slash */ +
       strlen(source_name) + 1);
     memcpy(dirname, path, pathlen);
-    char *slash = strchr(source_name, '/');
+    const char *slash = strchr(source_name, '/');
     assert(slash != NULL);
     strcpy(dirname + pathlen, slash);
     return dirname;

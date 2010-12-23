@@ -386,7 +386,7 @@ void MulticastSender::send_file()
     // TODO: attach a header
     uint32_t message[MAX_UDP_PACKET_SIZE];
     MulticastMessageHeader *mmh =
-      new(message)MulticastMessageHeader(MULTICAST_FILE_DATA, session_id);
+      new((void * const)message)MulticastMessageHeader(MULTICAST_FILE_DATA, session_id);
     memcpy(mmh + 1, pointer(), count);
     mcast_send(message, sizeof(MulticastMessageHeader) + count);
 #ifndef NDEBUG
@@ -485,7 +485,7 @@ MulticastSender *MulticastSender::create_and_initialize(
       }
 #ifdef NDEBUG
       if (local_destinations.size() > 2 ||
-          local_destinations.size() > 0 && is_multicast_only)
+          (local_destinations.size() > 0 && is_multicast_only))
 #else
       if (local_destinations.size() > 0)
 #endif

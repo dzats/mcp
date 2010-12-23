@@ -52,7 +52,7 @@ struct MulticastConnection {
   bool operator<(const MulticastConnection& arg) const
   {
     return source < arg.source ||
-      source == arg.source && session_id < arg.session_id;
+      (source == arg.source && session_id < arg.session_id);
   }
 };
 
@@ -691,7 +691,7 @@ int main(int argc, char **argv)
     // Get the number of the socket ready for read
     unsigned sock_num;
     for (sock_num = 0; sock_num < n_multicast_sockets; ++sock_num) {
-      if (pfds[sock_num].revents & POLLIN != 0) {
+      if ((pfds[sock_num].revents & POLLIN) != 0) {
         break;
       }
     }

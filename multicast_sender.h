@@ -33,7 +33,7 @@ private:
     bool operator<(const ErrorMessage& second) const
     {
       return number < second.number ||
-        number == second.number && from < second.from;
+        (number == second.number && from < second.from);
     }
     bool operator==(const ErrorMessage& second) const
     {

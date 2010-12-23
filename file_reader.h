@@ -38,7 +38,7 @@ private:
 
   // Reads data from fd (till the end of file) and passes it to
   // the distributor. Returns 0 on success and errno on failure.
-  int read_from_file(int fd, off_t size);
+  int read_from_file(int fd, uint64_t size);
 
   // Reads information about the directory 'dirname' and pass it to
   // the distributor.
