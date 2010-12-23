@@ -592,9 +592,11 @@ int main(int argc, char **argv)
               if (errno == EADDRINUSE) {
                 // TODO: send apropriate error message to the source
                 ERROR("Port %u is already in use\n", ephemeral_port);
+                close(ephemeral_sock);
                 continue;
               } else {
                 ERROR("Can't bind a UDP socket: %s\n", strerror(errno));
+                close(ephemeral_sock);
                 exit(EXIT_FAILURE);
               }
             }
