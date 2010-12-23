@@ -77,7 +77,7 @@ int MulticastSendQueue::wait_for_space(unsigned timeout) {
   TIMEVAL_TO_TIMESPEC(&current_time, &till_time);
   till_time.tv_sec += timeout / 1000000;
   till_time.tv_nsec += (timeout % 1000000) * 1000;
-  if (till_time.tv_nsec > 1000000000) {
+  if (till_time.tv_nsec >= 1000000000) {
     till_time.tv_nsec -= 1000000000;
     till_time.tv_sec += 1;
   }
