@@ -888,6 +888,12 @@ int main(int argc, char **argv)
               close(multicast_sockets[i]);
             }
             close(unicast_sock);
+
+            // Set the random number generator's seed
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            srand((tv.tv_sec << 8) + getpid() % (1 << 8));
+
             // execute the main routine
           } else {
             ERROR("fork: %s\n", strerror(errno));

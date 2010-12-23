@@ -641,6 +641,7 @@ int MulticastReceiver::session()
     (MulticastMessageHeader *)message_queue.get_message(&length);
   while (mmh != NULL) {
     // Do something with the message
+    uint8_t *end_of_message = (uint8_t *)mmh + length;
     switch (mmh->get_message_type()) {
       case MULTICAST_TARGET_PATHS: {
           // Search the target path
@@ -649,7 +650,6 @@ int MulticastReceiver::session()
             SDEBUG("Path is already detected, don't parse the message\n");
             break;
           }
-          uint8_t *end_of_message = (uint8_t *)mmh + length;
           uint32_t *nsources_p = (uint32_t *)(mmh + 1);
           n_sources = ntohl(*nsources_p);
           DestinationHeader *p = (DestinationHeader *)(nsources_p + 1);
@@ -695,15 +695,22 @@ int MulticastReceiver::session()
             pthread_join(read_messages_thread, NULL);
             return EXIT_FAILURE;
           }
-          FileInfoHeader *fih = (FileInfoHeader *)(mmh + 1);
-          file_info_header = *fih;
-          if (fih->get_name_length() >= MAXPATHLEN) {
-            throw ConnectionException(
-              ConnectionException::corrupted_data_received);
-          }
-          // Read the file name
+
           if (filename != NULL) {
             free(filename);
+            filename = NULL;
+          }
+          if (fd != -1) {
+            close(fd);
+            fd = -1;
+          }
+          // Read the file name
+          FileInfoHeader *fih = (FileInfoHeader *)(mmh + 1);
+          file_info_header = *fih;
+          if (fih->get_name_length() >= MAXPATHLEN ||
+              (uint8_t *)(fih + 1) + fih->get_name_length() > end_of_message) {
+            assert(0);
+            continue;
           }
           filename = (char *)malloc(fih->get_name_length() + 1);
           memcpy(filename, (char *)(fih + 1), fih->get_name_length());
