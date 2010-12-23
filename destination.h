@@ -9,7 +9,12 @@ struct Destination
 {
   uint32_t addr;
   std::string filename;
-  Destination(int s, char *f) : addr(s), filename(f) {}
+  Destination(int s, const char *f) : addr(s)
+  {
+    if (f != NULL) {
+      filename.assign(f);
+    }
+  }
   Destination(const Destination& src)
   {
     addr = src.addr;
