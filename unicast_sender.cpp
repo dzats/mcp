@@ -334,6 +334,10 @@ int UnicastSender::session()
           }
           if (write_result != op->fileinfo.get_file_size()) {
             // File has been shrinked or enlarged during the transmission
+
+            // Following sleep is a workaround for some FreeBSD 7 kernel bug.
+            // Without this sleep FreeBSD can lose 1 byte of normal data.
+            sleep(2);
             static const uint8_t trailing = OOB_FILE_SIZE_CHANGED;
             sendn(sock, &trailing, 1, MSG_OOB);
             SDEBUG("Out-of-band data 1 sent\n");
