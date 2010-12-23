@@ -10,8 +10,10 @@
 #include <sys/mman.h> // for mmap
 #include <sys/socket.h>
 #include <sys/time.h> // for gettimeofday
+#include <sys/limits.h> // for UID_MAX
 #include <fcntl.h>
 #include <poll.h>
+#include <pwd.h>
 
 #include <netinet/in.h>
 #include <arpa/inet.h> // for inet_addr
@@ -266,79 +268,57 @@ static int send_multicast_error(uint8_t status, int sock,
   return 0;
 }
 
-// Get UID, GID and home directory from the /etc/passwd file
-void get_uid_gid_and_homedir(const char *command)
-{
-  size_t sizeof_output = 160;
-  char *output = (char *)malloc(sizeof_output);
-  char *pointer = output;
-  FILE *f = popen(command, "r");
-  if (f == NULL) {
-    ERROR("Can't execute command %s: %s\n", command, strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-
-  int read_result;
-  do {
-    read_result = fread(pointer, sizeof(char),
-      pointer + sizeof_output - output, f);
-    pointer += read_result;
-    if ((size_t)(pointer - output) == sizeof_output) {
-      ptrdiff_t ptr_offset = pointer - output;
-      sizeof_output *= 2;
-      output = (char *)realloc(output, sizeof_output);
-      pointer = output + ptr_offset;
-    }
-  } while (read_result != 0);
-
-  if (pointer == output) {
-    ERROR("User %s was not found in the /etc/passwd file\n", optarg);
-    exit(EXIT_FAILURE);
-  } else if (ferror(f)) {
-    ERROR("Can't read the /etc/passwd file: %s\n", strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-  pclose(f);
-  *(pointer - 1) = '\0';
-
-  char *uid_tok, *gid_tok, *homedir_tok;
-  uid_tok = strtok(output, ":");
-  gid_tok = strtok(NULL, ":");
-  homedir_tok = strtok(NULL, ":");
-  if (uid_tok == NULL || gid_tok == NULL || homedir_tok == NULL) {
-    SERROR("Incorrect format of the /etc/passwd file\n");
-    exit(EXIT_FAILURE);
-  }
-  uid = atoi(uid_tok);
-  gid = atoi(gid_tok);
-  homedir = strdup(homedir_tok);
-  DEBUG("New UID: %u, new GID: %u, new home directory: %s\n", uid,
-    gid, homedir);
-  free(output);
-}
-
 // Change UID, GID and home directory of the daemon
 void change_user(const char *name)
 {
+  if (*name == '\0') {
+    SERROR("Username passed to the -u option is empty\n");
+    exit(EXIT_FAILURE);
+  }
   free(homedir);
   uid = atoi(name);
-  if (uid == 0 && (name[0] != '0' || name[1] != '\0')) {
+  char *endptr;
+  unsigned long n = strtoul(name, &endptr, 10);
+  struct passwd* pw;
+  errno = 0; // According to POSIX
+  if (*endptr != '\0') {
     // The parameter specified as a string
     // Search for UID, GID and home directory in the passwd file
-    const char *command_format =
-      "grep ^%s /etc/passwd | cut -d : -f 3,4,6";
-    char command[sizeof(command_format) + strlen(name)];
-    sprintf(command, command_format, name);
-    get_uid_gid_and_homedir(command);
+    pw = getpwnam(name);
+    if (pw == NULL) {
+      if (errno != 0) {
+        ERROR("Can't get passwd entry for %s: %s\n", name,
+          strerror(errno));
+      } else {
+        ERROR("No passwd entry for %s\n", name);
+      }
+      exit(EXIT_FAILURE);
+    }
   } else {
     // The parameter specified as a number
     // Search for GID and home directory in the passwd file
-    const char *command_format =
-      "grep ^[^:]*:[^:]*:%s /etc/passwd | cut -d : -f 3,4,6";
-    char command[sizeof(command_format) + strlen(name)];
-    sprintf(command, command_format, name);
-    get_uid_gid_and_homedir(command);
+#ifdef UID_MAX
+    if (n > UID_MAX) {
+      SERROR("UID passed to the -u option is too big\n");
+      exit(EXIT_FAILURE);
+    }
+#endif
+    pw = getpwuid(n);
+    if (pw == NULL) {
+      if (errno != 0) {
+        ERROR("Can't get passwd entry for uid %lu: %s\n", n, strerror(errno));
+      } else {
+        ERROR("No passwd entry for uid %lu\n", n);
+      }
+      exit(EXIT_FAILURE);
+    }
   }
+
+  uid = pw->pw_uid;
+  gid = pw->pw_gid;
+  homedir = strdup(pw->pw_dir);
+  DEBUG("New UID: %u, new GID: %u, new home directory: %s\n", uid,
+    gid, homedir);
 }
 
 int main(int argc, char **argv)
