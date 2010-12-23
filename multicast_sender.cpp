@@ -27,35 +27,45 @@ uint16_t MulticastSender::choose_ephemeral_port(bool use_global_multicast)
   ephemeral_addr.sin_addr.s_addr = htonl(local_address);
   int bind_result;
   int tries = MAX_PORT_CHOOSING_TRIES;
+
+  // Randomly choose an ephemeral UDP port for the multicast connection
+  // FIXME: It's not a very good decisition
+  ephemeral_port = 49152 + rand() % (58000 - 49152);
   do {
-    // Randomly choose the ephemeral UDP port for multicast connection
-    // FIXME: It can be not very good decisition
-    ephemeral_port = 49152 + rand() % (65536 - 49152);
+    --tries;
     ephemeral_addr.sin_port = htons(ephemeral_port);
-    DEBUG("try ephemeral UDP port: %d\n", ephemeral_port);
+    DEBUG("Try ephemeral UDP port: %d\n", ephemeral_port);
 
     bind_result = bind(sock, (struct sockaddr *)&ephemeral_addr,
       sizeof(ephemeral_addr));
 
-    // Set default interface for multicast traffic
-    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
-        &ephemeral_addr.sin_addr, sizeof(ephemeral_addr.sin_addr)) != 0) {
-      ERROR("Can't set default interface for outgoing multicast traffic: %s\n",
-        strerror(errno));
-      exit(EXIT_FAILURE);
-    }
-
-    if (use_global_multicast) {
-      // Set TTL for multicast packets
-      unsigned char ttl = 31;
-      if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL,
-          &ttl, sizeof(ttl)) != 0) {
-        ERROR("Can't set TTL for outgoing multicast packets: %s\n",
-          strerror(errno));
+    if (bind_result != 0) {
+      ephemeral_port = ephemeral_port + EPHEMERAL_PORT_CHOOSING_STEP;
+      if (ephemeral_port >= 58000) {
+        ephemeral_port = ephemeral_port - 58000 + 49152;
+      }
+      continue;
+    } else {
+      // Set default interface for multicast traffic
+      if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+          &ephemeral_addr.sin_addr, sizeof(ephemeral_addr.sin_addr)) != 0) {
+        ERROR("Can't set default interface "
+          "for outgoing multicast traffic: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
       }
+  
+      if (use_global_multicast) {
+        // Set TTL for multicast packets
+        unsigned char ttl = 31;
+        if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL,
+            &ttl, sizeof(ttl)) != 0) {
+          ERROR("Can't set TTL for outgoing multicast packets: %s\n",
+            strerror(errno));
+          exit(EXIT_FAILURE);
+        }
+      }
     }
-  } while (bind_result != 0 && tries-- > 0 && errno == EADDRINUSE);
+  } while (tries > 0 && errno == EADDRINUSE);
   return bind_result == 0 ? ephemeral_port : 0;
 }
 

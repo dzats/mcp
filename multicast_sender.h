@@ -58,7 +58,8 @@ private:
   static const unsigned MAX_RETRANSMISSION_TIMEOUT = 4; // (in seconds)
     // Maximum timeout between two successive retransmissions of the
     // MULTICAST_TERMINATION_REQUEST message
-  static const unsigned MAX_PORT_CHOOSING_TRIES = 10;
+  static const unsigned MAX_PORT_CHOOSING_TRIES = 100;
+  static const unsigned EPHEMERAL_PORT_CHOOSING_STEP = 111;
 
   Mode mode; // Whether the UnicastSender object is used by the client (mcp)
     // tool or by the server mcpd tool
