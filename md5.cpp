@@ -55,10 +55,10 @@ MD5sum::MD5sum()
   Update context to reflect the concatenation of another buffer full
   of bytes.
 */
-void MD5sum::update(void *buff, unsigned len)
+void MD5sum::update(const void *buff, unsigned len)
 {
   uint32_t t;
-  uint8_t *buf = (uint8_t *)buff;
+  const uint8_t *buf = (const uint8_t *)buff;
 
   /* Update bitcount */
 

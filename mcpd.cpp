@@ -1,34 +1,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/mman.h> // for mmap
 #include <sys/socket.h>
 #include <sys/time.h> // for gettimeofday
-#include <netinet/in.h>
-
-#include <sys/stat.h>
-#include <sys/mman.h>
-
-#include <signal.h> // for SIGPIPE
-
 #include <fcntl.h>
 #include <poll.h>
 
-#include <unistd.h> // for getopt
+#include <netinet/in.h>
+#include <arpa/inet.h> // for inet_addr
 
 #include <vector>
 #include <set>
 #include <string>
 
-#include <arpa/inet.h> // for inet addr
-
 #include "md5.h"
 #include "destination.h"
 #include "connection.h"
 #include "distributor.h"
+
+#include "log.h"
 
 #include "multicast_receiver.h"
 #include "unicast_receiver.h"
@@ -36,23 +33,24 @@
 #include "unicast_sender.h"
 #include "file_writer.h"
 
-#include "log.h"
+using namespace std;
 
 // Structure storing information about an established multicast connection
-struct MulticastConnection
-{
+struct MulticastConnection {
   uint32_t source; // Source of the multicast connection
   uint32_t session_id; // Session id of the multicast connection
-  pid_t  pid; // PID of the process handling the 
+  pid_t pid; // PID of the process handling the 
   mutable bool is_in_time_wait; // Whether this connection is in the
     // time wait state
   MulticastConnection(uint32_t src, uint32_t sid, pid_t p) : source(src),
-    session_id(sid), pid(p), is_in_time_wait(false) {};
+    session_id(sid), pid(p), is_in_time_wait(false) {}
 
-  bool operator==(const MulticastConnection& arg) const {
+  bool operator==(const MulticastConnection& arg) const
+  {
     return source == arg.source && session_id == arg.session_id;
   }
-  bool operator<(const MulticastConnection& arg) const {
+  bool operator<(const MulticastConnection& arg) const
+  {
     return source < arg.source ||
       source == arg.source && session_id < arg.session_id;
   }
@@ -69,14 +67,13 @@ public:
   }
 };
 
-using namespace std;
-
 // Global variables
 uid_t uid; // User id of the daemon
 uid_t gid; // Group id of the daemon
 char *homedir; // Home directory of the daemon
 
-set<MulticastConnection> multicast_sessions; // Established multicast sessions
+set<MulticastConnection> multicast_sessions; // Established multicast
+  // sessions
 
 sig_atomic_t max_n_connections; // Max number of the simultaneous
   // connections allowed to this server

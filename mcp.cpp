@@ -509,7 +509,7 @@ int main(int argc, char **argv)
           //source_reader->delete_recoverable_errors();
           delete source_reader;
           if (source_reader->is_server_busy()) {
-            DEBUG("Will try to connect again after %u milleseconds\n", 
+            DEBUG("Will try to connect again after %u microseconds\n", 
               1000000 * RECONNECTION_TIMEOUT +
               unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
               ((float)rand()/RAND_MAX)));
@@ -568,7 +568,7 @@ int main(int argc, char **argv)
           delete source_reader;
           if (session_init_result == STATUS_SERVER_IS_BUSY) {
             // Wait for some time interval
-            DEBUG("Will try to connect again after %u milleseconds\n", 
+            DEBUG("Will try to connect again after %u microseconds\n", 
               1000000 * RECONNECTION_TIMEOUT +
               unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
               ((float)rand()/RAND_MAX)));
@@ -675,7 +675,7 @@ int main(int argc, char **argv)
     // Restart the client if some of the servers have been busy
     if (is_recoverable_error_occurred) {
       if (is_server_busy) {
-        DEBUG("Will try to connect again after %u milleseconds\n", 
+        DEBUG("Will try to connect again after %u microseconds\n", 
           1000000 * RECONNECTION_TIMEOUT +
           unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
           ((float)rand()/RAND_MAX)));

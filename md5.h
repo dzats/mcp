@@ -39,7 +39,7 @@ public:
   static void display_signature(FILE *stream,
     const unsigned char *signature);
   MD5sum();
-  void update(void *buff, unsigned len);
+  void update(const void *buff, unsigned len);
   void final();
 };
 
