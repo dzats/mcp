@@ -514,6 +514,10 @@ MulticastSender *MulticastSender::create_and_initialize(
 #endif
           }
         }
+        // Some packets sent to a newly created multicast group are lost.
+        // Sleep here is to avoid/decrease this.
+        // FIXME: A better approach should be developed
+        usleep(20000);
         *remaining_dst = new_dst;
         return multicast_sender;
       }
@@ -553,7 +557,7 @@ const std::vector<Destination>* MulticastSender::session_init(
     return NULL;
   }
 
-  // Choose a UDP port
+  // Choose an ephemeral UDP port
   errno = 0;
   uint16_t ephemeral_port = choose_ephemeral_port();
   if (ephemeral_port == 0) {
@@ -564,14 +568,38 @@ const std::vector<Destination>* MulticastSender::session_init(
   }
   DEBUG("Ephemeral port for the new connection is: %u\n", ephemeral_port);
 
+  // Choose an ephemeral multicast address
+  in_addr_t ephemeral_addr; 
+  ephemeral_addr = inet_addr(MULTICAST_EPHEMERAL_ADDR_RANGE);
+  in_addr_t ephemeral_mask; 
+  ephemeral_mask = inet_addr(MULTICAST_EPHEMERAL_ADDR_MASK);
+  uint32_t mask = ntohl(ephemeral_mask);
+  ephemeral_addr = htonl(ntohl(ephemeral_addr) & mask);
+  uint32_t interface_id = rand() & ~mask;
+  if ((interface_id & 0xFF) == 0 || (interface_id & 0xFF) == 0xFF) {
+    interface_id = 0x11111111 & ~mask;
+  }
+  ephemeral_addr |= htonl(interface_id);
+
+#ifndef NDEBUG
+  char e_addr[INET_ADDRSTRLEN];
+  DEBUG("Ephemeral multicast address: %s\n",
+    inet_ntop(AF_INET, &ephemeral_addr, e_addr, sizeof(e_addr)));
+#endif
+
   // Compose the session initialization message
   unsigned init_message_length = sizeof(MulticastMessageHeader) +
-    dst.size() * sizeof(MulticastHostRecord);
+    sizeof(MulticastInitData) + dst.size() * sizeof(MulticastHostRecord);
   uint8_t init_message[init_message_length];
   MulticastMessageHeader *mmh = new(init_message)
     MulticastMessageHeader(MULTICAST_INIT_REQUEST, session_id);
 
-  MulticastHostRecord *hr = (MulticastHostRecord *)(mmh + 1);
+  // Fill up the message data
+  MulticastInitData *mid = new(mmh + 1) MulticastInitData(PROTOCOL_VERSION,
+    ntohl(ephemeral_addr));
+
+  // Fill up the host records
+  MulticastHostRecord *hr = (MulticastHostRecord *)(mid + 1);
   MulticastHostRecord *hr_begin = hr;
   for (uint32_t i = 0; i < dst.size(); ++i) {
     hr->set_addr(dst[i].addr);
@@ -688,6 +716,8 @@ const std::vector<Destination>* MulticastSender::session_init(
               reader->update_multicast_sender_status(rh->get_status());
               if (rh->get_status() >= STATUS_FIRST_FATAL_ERROR) {
                 // Terminate the connection
+                address = ephemeral_addr;
+                target_address.sin_addr.s_addr = address;
                 target_address.sin_port = htons(ephemeral_port);
                 sort(targets.begin(), targets.end());
                 abnormal_termination();
@@ -725,6 +755,8 @@ const std::vector<Destination>* MulticastSender::session_init(
 
 finish_session_initialization:
   // Set the new (ephemeral) port as the target port for the next messages
+  address = ephemeral_addr;
+  target_address.sin_addr.s_addr = address;
   target_address.sin_port = htons(ephemeral_port);
 
   if (send_queue != NULL) {

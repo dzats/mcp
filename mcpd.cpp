@@ -216,8 +216,7 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
   uint8_t reply_message[sizeof(MulticastMessageHeader) +
     addresses.size() * sizeof(uint32_t)];
   MulticastMessageHeader *reply_header =
-    new(reply_message)MulticastMessageHeader(MULTICAST_INIT_REPLY,
-    session_id);
+    new(reply_message) MulticastMessageHeader(MULTICAST_INIT_REPLY, session_id);
   reply_header->set_number(number);
   uint32_t *p = (uint32_t *)(reply_header + 1);
   for (unsigned i = 0; i < addresses.size(); ++i) {
@@ -244,9 +243,9 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
 }
 
 // Sends the multicast STATUS_SERVER_IS_BUSY error message
-static int send_multicast_server_is_busy(int sock, uint32_t session_id,
-    uint32_t number, const struct sockaddr_in *destination_addr,
-    uint32_t local_address)
+static int send_multicast_error(uint8_t status, int sock,
+    uint32_t session_id, uint32_t number,
+    const struct sockaddr_in *destination_addr, uint32_t local_address)
 {
   // Compose the reply message
   uint8_t error_message[sizeof(MulticastMessageHeader) + sizeof(ReplyHeader)];
@@ -254,7 +253,7 @@ static int send_multicast_server_is_busy(int sock, uint32_t session_id,
     MulticastMessageHeader(MULTICAST_ERROR_MESSAGE, session_id);
   mmh->set_number(number);
 
-  new(mmh + 1) ReplyHeader(STATUS_SERVER_IS_BUSY, local_address, 0);
+  new(mmh + 1) ReplyHeader(status, local_address, 0);
 
   // Send the error
   if (send_datagram(sock, error_message, sizeof(error_message),
@@ -499,6 +498,7 @@ int main(int argc, char **argv)
   nfds_t n_pfds;
   vector<uint32_t> addresses; // Local IP addresses (non-loopback)
 
+#ifdef USE_MULTICAST
   if (!unicast_only) {
     // Some initialization routine to accept multicast connections
 
@@ -576,10 +576,13 @@ int main(int argc, char **argv)
       pfds[i].events = POLLIN;
     }
   } else {
+#endif
     n_pfds = 1;
     pfds = new pollfd;
     memset(pfds, 0, sizeof(pollfd));
+#ifdef USE_MULTICAST
   }
+#endif
 
   // Some initialization routine for the unicast connection
   if (!multicast_only) {
@@ -616,6 +619,13 @@ int main(int argc, char **argv)
       exit(EXIT_FAILURE);
     }
   }
+#ifndef USE_MULTICAST
+  else {
+    SERROR("The mcpd daemon was built without the multicast support. "
+      "You can't use the -m option.\n");
+    exit(EXIT_FAILURE);
+  }
+#endif
 
   // Become a daemon process and proceeed to the home directory
   if (!debug_mode) {
@@ -670,18 +680,37 @@ int main(int argc, char **argv)
           SDEBUG("Unexpected datargam received\n");
           continue;
         }
+
+        MulticastInitData *mid = (MulticastInitData *)(mmh + 1);
+        if (mid->get_version() != PROTOCOL_VERSION) {
+          ERROR("Incorrect protocol version %u in the Multicast Init Message, "
+            "current version is %u\n", (unsigned)mid->get_version(),
+            PROTOCOL_VERSION);
+          continue;
+        }
+        uint32_t ephemeral_addr = mid->get_ephemeral_address();
+#ifndef NDEBUG
+        char ephemeral_address[INET_ADDRSTRLEN];
+        uint32_t e_addr = htonl(ephemeral_addr);
+        DEBUG("Ephemeral address: %s\n",
+          inet_ntop(AF_INET, &e_addr, ephemeral_address,
+          sizeof(ephemeral_address)));
+        ephemeral_addr = ntohl(ephemeral_addr);
+#endif
+
         uint16_t ephemeral_port = ntohs(multicast_sender_addr.sin_port);
         struct sockaddr_in source_addr = multicast_sender_addr;
         source_addr.sin_port = htons(ephemeral_port);
 #ifndef NDEBUG
         char cl_addr[INET_ADDRSTRLEN];
         DEBUG("Received %zu (%u) destinations from %s, port: %u\n",
-          (len - sizeof(MulticastMessageHeader)) / sizeof(MulticastHostRecord),
-          len, inet_ntop(AF_INET, &multicast_sender_addr.sin_addr, cl_addr,
+          (len - sizeof(MulticastMessageHeader) - sizeof(MulticastInitData)) /
+          sizeof(MulticastHostRecord), len,
+          inet_ntop(AF_INET, &multicast_sender_addr.sin_addr, cl_addr,
           sizeof(cl_addr)), ephemeral_port);
 #endif
         // Look for the matching addresses
-        MulticastHostRecord *hr = (MulticastHostRecord *)(mmh + 1);
+        MulticastHostRecord *hr = (MulticastHostRecord *)(mid + 1);
         vector<uint32_t> matches;
         uint32_t local_address = 0;
         for(unsigned i = 0; i < addresses.size(); ++i) {
@@ -717,9 +746,9 @@ int main(int argc, char **argv)
             if (max_n_connections > 0 &&
                 n_connections >= max_n_connections) {
               // Server is busy
-              send_multicast_server_is_busy(multicast_sockets[sock_num],
-                mmh->get_session_id(), mmh->get_number(), &source_addr,
-                local_address);
+              send_multicast_error(STATUS_SERVER_IS_BUSY,
+                multicast_sockets[sock_num], mmh->get_session_id(),
+                mmh->get_number(), &source_addr, local_address);
               continue;
             }
             // Try availability of the ephemeral port
@@ -730,20 +759,23 @@ int main(int argc, char **argv)
               exit(EXIT_FAILURE);
             }
             DEBUG("Ephemeral socket %d created\n", ephemeral_sock);
-            struct sockaddr_in ephemeral_addr;
-            memset(&ephemeral_addr, 0, sizeof(ephemeral_addr));
+            struct sockaddr_in l_addr;
+            memset(&l_addr, 0, sizeof(l_addr));
             // TODO: Cleverly choose the address that will be used
             // in the conneciton
-            ephemeral_addr.sin_family = AF_INET;
-            ephemeral_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-            ephemeral_addr.sin_port = htons(ephemeral_port);
-    
-            if (bind(ephemeral_sock, (struct sockaddr *)&ephemeral_addr,
-                sizeof(ephemeral_addr)) != 0) {
+            l_addr.sin_family = AF_INET;
+            l_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            l_addr.sin_port = htons(ephemeral_port);
+
+            if (bind(ephemeral_sock, (struct sockaddr *)&l_addr,
+                sizeof(l_addr)) != 0) {
               if (errno == EADDRINUSE) {
                 // TODO: send apropriate error message to the source
-                ERROR("Port %u is already in use\n", ephemeral_port);
+                DEBUG("Port %u is already in use\n", ephemeral_port);
                 close(ephemeral_sock);
+                send_multicast_error(STATUS_PORT_IN_USE,
+                  multicast_sockets[sock_num], mmh->get_session_id(),
+                  mmh->get_number(), &source_addr, local_address);
                 continue;
               } else {
                 ERROR("Can't bind a UDP socket: %s\n", strerror(errno));
@@ -763,7 +795,8 @@ int main(int argc, char **argv)
                 close(unicast_sock);
                 // Create a MulticastReceiver object
                 MulticastReceiver *multicast_receiver = new MulticastReceiver(
-                  ephemeral_sock, shmem, source_addr, mmh->get_session_id(),
+                  ephemeral_sock, shmem, ephemeral_addr, source_addr,
+                  mmh->get_session_id(),
                   local_address, addresses[sock_num], bandwidth);
                 int status = multicast_receiver->session();
                 // finish the work

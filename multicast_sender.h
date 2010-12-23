@@ -74,7 +74,7 @@ private:
   struct timeval bandwidth_estimation_timestamp; // auxilary variable used to
     // implement the bandwidth limitation
 
-  uint32_t address; // Multicast address that will be used in connection
+  uint32_t address; // Multicast address that will be used in the connection
   uint16_t port; // port that will be used for multicast connections
 
   uint32_t session_id; // Multicast session ID

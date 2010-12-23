@@ -33,6 +33,7 @@ class MulticastReceiver
   const struct sockaddr_in& source_addr; // Address of the multicast sender
   uint32_t session_id; // id of the multicast sender
   uint32_t local_address; // local IP address which the session establish with
+  uint32_t multicast_address; // Multicast Address used in the session
   uint32_t interface_address; // Address of the interface used for multicast
     // connection
 
@@ -93,15 +94,16 @@ class MulticastReceiver
 public:
   MulticastReceiver(int s,
       void *shared_mem,
+      uint32_t multicast_addr,
       const struct sockaddr_in& saddr,
       uint32_t sid,
       uint32_t local_addr,
       uint32_t interface_addr,
       unsigned bw) :
       sock(s), bandwidth(bw), source_addr(saddr), session_id(sid),
-      local_address(local_addr), interface_address(interface_addr),
-      path(NULL), n_sources(0), next_message_expected(0), fd(-1),
-      filename(NULL) {
+      local_address(local_addr), multicast_address(multicast_addr),
+      interface_address(interface_addr), path(NULL), n_sources(0),
+      next_message_expected(0), fd(-1), filename(NULL) {
     bytes_received = (volatile unsigned *)shared_mem;
   }
   ~MulticastReceiver()

@@ -159,11 +159,12 @@ public:
     // Displays the registered errors 
     void display();
 
-    // Delete the STATUS_SERVER_IS_BUSY errors
-    void delete_server_is_busy_errors() {
+    // Delete the recoverable errors
+    void delete_recoverable_errors() {
       for(std::list<ErrorMessage*>::iterator i = errors.begin();
           i != errors.end(); ++i) {
-        if ((*i)->status == STATUS_SERVER_IS_BUSY) {
+        if ((*i)->status == STATUS_SERVER_IS_BUSY ||
+            (*i)->status == STATUS_PORT_IN_USE) {
           delete(*i);
           std::list<ErrorMessage*>::iterator next = i;
           ++next;
@@ -176,6 +177,9 @@ public:
     // Returns true if some of the errors is unrecoverable (even if it is not
     // fatal) and false otherwise
     bool is_unrecoverable_error_occurred();
+
+    // Returns true if the STATUS_SERVER_IS_BUSY error occurred
+    bool is_server_busy();
 
     // Sends the occurred error to the imediate unicast source
     void send(int sock);
@@ -333,13 +337,19 @@ public:
     errors.display();
   }
 
-  // Delete the STATUS_SERVER_IS_BUSY errors
-  void delete_server_is_busy_errors() {
-    errors.delete_server_is_busy_errors();
+  // Delete the recoverable errors
+  void delete_recoverable_errors() {
+    errors.delete_recoverable_errors();
   }
 
   // Wrapper for the Errors.is_unrecoverable_error_occurred
   bool is_unrecoverable_error_occurred()
+  {
+    return errors.is_unrecoverable_error_occurred();
+  }
+
+  // Wrapper for the Errors.is_server_busy
+  bool is_server_busy()
   {
     return errors.is_unrecoverable_error_occurred();
   }

@@ -56,6 +56,8 @@ void usage_and_exit(char *name)
   "\t-U\tUnicast only (for all hops).\n\n"
   "\t-u\tUnicast only (for the first hop).\n\n"
   "\t-m\tMulticast only.\n\n"
+  "\t-g\tTry to establish multicast connection with all the destinations,\n"
+  "\t\tNot only the link-local ones\n\n"
   "\t-c\tVerify the file checksums twise. The second verification is\n"
   "\t\tperformed on data written to the disk.\n\n"
   "\t-b bytes\n"
@@ -447,17 +449,19 @@ int main(int argc, char **argv)
           delete source_reader;
           exit(EXIT_FAILURE);
         } else {
-          source_reader->delete_server_is_busy_errors();
+          //source_reader->delete_recoverable_errors();
           delete source_reader;
+          if (source_reader->is_server_busy()) {
+            DEBUG("Will try to connect again after %u milleseconds\n", 
+              1000000 * RECONNECTION_TIMEOUT +
+              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+              ((float)rand()/RAND_MAX)));
+            usleep(1000000 * RECONNECTION_TIMEOUT +
+              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+              ((float)rand()/RAND_MAX)));
+          }
           // FIXME: add limitation to the muximum time a client can wait
           // till some server is busy.
-          DEBUG("Will try to connect again after %u milleseconds\n", 
-            1000000 * RECONNECTION_TIMEOUT +
-            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-            ((float)rand()/RAND_MAX)));
-          usleep(1000000 * RECONNECTION_TIMEOUT +
-            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-            ((float)rand()/RAND_MAX)));
           goto try_to_connect_again;
         }
       }
@@ -489,9 +493,9 @@ int main(int argc, char **argv)
       uint8_t session_init_result =
         unicast_sender->session_init(*remaining_dst, n_sources);
       if (session_init_result != STATUS_OK) {
-        if (session_init_result == STATUS_SERVER_IS_BUSY) {
-          // Server is busy, wait for some time then try to establish
-          // connections again
+        if (session_init_result == STATUS_SERVER_IS_BUSY ||
+            session_init_result == STATUS_PORT_IN_USE) {
+          // It is recoverable error, just try to establish conection again
           delete unicast_sender;
           unicast_sender = NULL;
           if (multicast_sender != NULL) {
@@ -503,16 +507,19 @@ int main(int argc, char **argv)
             delete remaining_dst;
           }
           remaining_dst = NULL;
-          source_reader->delete_server_is_busy_errors();
+          //source_reader->delete_server_is_busy_errors();
           delete source_reader;
+          if (session_init_result == STATUS_SERVER_IS_BUSY) {
+            // Wait for some time interval
+            DEBUG("Will try to connect again after %u milleseconds\n", 
+              1000000 * RECONNECTION_TIMEOUT +
+              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+              ((float)rand()/RAND_MAX)));
+            usleep(1000000 * RECONNECTION_TIMEOUT +
+              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+              ((float)rand()/RAND_MAX)));
+          }
           // FIXME: add limitation for the muximum time the client can wait
-          DEBUG("Will try to connect again after %u milleseconds\n", 
-            1000000 * RECONNECTION_TIMEOUT +
-            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-            ((float)rand()/RAND_MAX)));
-          usleep(1000000 * RECONNECTION_TIMEOUT +
-            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-            ((float)rand()/RAND_MAX)));
           goto try_to_connect_again;
         } else {
           source_reader->display_errors();
@@ -545,11 +552,12 @@ int main(int argc, char **argv)
     }
   
     bool is_unrecoverable_error_occurred = false;
-    bool is_some_server_busy = false;
+    bool is_recoverable_error_occurred = false;
     uint8_t source_reader_result = 
       source_reader->read_sources(filenames, filename_offsets);
     if (source_reader_result != STATUS_OK &&
         source_reader_result != STATUS_INCORRECT_CHECKSUM &&
+        source_reader_result != STATUS_PORT_IN_USE &&
         source_reader_result != STATUS_SERVER_IS_BUSY) {
       SDEBUG("The SourceReader finished with unrecoverable error\n");
       is_unrecoverable_error_occurred = true;
@@ -564,7 +572,11 @@ int main(int argc, char **argv)
         assert(status != STATUS_INCORRECT_CHECKSUM);
         if (status == STATUS_SERVER_IS_BUSY) {
           SDEBUG("The UnicastSender finished with the SERVER_IS_BUSY error\n");
-          is_some_server_busy = true;
+          is_recoverable_error_occurred = true;
+        } else if (status == STATUS_PORT_IN_USE) {
+          SDEBUG("The UnicastSender finished with the STATUS_PORT_IN_USE "
+            "error\n");
+          is_recoverable_error_occurred = true;
         } else {
           SDEBUG("The UnicastSender finished with an unrecoverable error\n");
           is_unrecoverable_error_occurred = true;
@@ -579,7 +591,7 @@ int main(int argc, char **argv)
       }
     }
 
-    source_reader->delete_server_is_busy_errors();
+    source_reader->delete_recoverable_errors();
     source_reader->display_errors();
     if (source_reader->is_unrecoverable_error_occurred()) {
       is_unrecoverable_error_occurred = true;
@@ -603,15 +615,18 @@ int main(int argc, char **argv)
     }
 
     // Restart the client if some of the servers have been busy
-    if (is_some_server_busy) {
+    if (is_recoverable_error_occurred) {
+      if (source_reader->is_server_busy()) {
+        DEBUG("Will try to connect again after %u milleseconds\n", 
+          1000000 * RECONNECTION_TIMEOUT +
+          unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+          ((float)rand()/RAND_MAX)));
+        usleep(1000000 * RECONNECTION_TIMEOUT +
+          unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+          ((float)rand()/RAND_MAX)));
+      }
       // FIXME: add limitation to the muximum time the client can wait
-      DEBUG("Will try to connect again after %u milleseconds\n", 
-        1000000 * RECONNECTION_TIMEOUT +
-        unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-        ((float)rand()/RAND_MAX)));
-      usleep(1000000 * RECONNECTION_TIMEOUT +
-        unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-        ((float)rand()/RAND_MAX)));
+      delete source_reader;
       goto try_to_connect_again;
     }
 

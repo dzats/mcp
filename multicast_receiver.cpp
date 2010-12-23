@@ -280,16 +280,26 @@ void MulticastReceiver::read_messages()
   // Join socket to the multicast group
   struct ip_mreq mreq;
   struct in_addr maddr;
-  maddr.s_addr = inet_addr(DEFAULT_MULTICAST_ADDR);
+  maddr.s_addr = htonl(multicast_address);
   memcpy(&mreq.imr_multiaddr, &maddr, sizeof(maddr));
-  mreq.imr_interface.s_addr = ntohl(interface_address);
+  mreq.imr_interface.s_addr = htonl(interface_address);
+
+#ifndef NDEBUG
+  char t_addr[INET_ADDRSTRLEN];
+  char t_maddr[INET_ADDRSTRLEN];
+  DEBUG("Join to the multicast group %s on %s\n",
+    inet_ntop(AF_INET, &maddr.s_addr, t_maddr, sizeof(t_maddr)),
+    inet_ntop(AF_INET, &mreq.imr_interface.s_addr, t_addr, sizeof(t_addr)));
+#endif
 
   if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
       sizeof(mreq)) != 0) {
-    char addr[INET_ADDRSTRLEN];
-    uint32_t i_addr = ntohl(interface_address);
-    ERROR("Can't join the multicast group " DEFAULT_MULTICAST_ADDR " on %s: %s",
-      inet_ntop(AF_INET, &i_addr, addr, sizeof(addr)), strerror(errno));
+    char t_addr[INET_ADDRSTRLEN];
+    char t_maddr[INET_ADDRSTRLEN];
+    ERROR("Can't join the multicast group %s on %s: %s",
+      inet_ntop(AF_INET, &maddr.s_addr, t_maddr, sizeof(t_maddr)),
+      inet_ntop(AF_INET, &mreq.imr_interface.s_addr, t_addr, sizeof(t_addr)),
+      strerror(errno));
     message_queue.set_fatal_error();
     pthread_exit(NULL);
   }

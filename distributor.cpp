@@ -169,7 +169,24 @@ bool Distributor::Errors::is_unrecoverable_error_occurred()
   for (list<ErrorMessage*>::const_iterator i = errors.begin();
       i != errors.end(); ++i) {
     if ((*i)->status != STATUS_INCORRECT_CHECKSUM &&
-        (*i)->status != STATUS_SERVER_IS_BUSY) {
+        (*i)->status != STATUS_SERVER_IS_BUSY &&
+        (*i)->status != STATUS_PORT_IN_USE) {
+      result = true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&mutex);
+  return result;
+}
+
+// Returns true if the STATUS_SERVER_IS_BUSY error occurred
+bool Distributor::Errors::is_server_busy()
+{
+  pthread_mutex_lock(&mutex);
+  bool result = false;
+  for (list<ErrorMessage*>::const_iterator i = errors.begin();
+      i != errors.end(); ++i) {
+    if ((*i)->status != STATUS_SERVER_IS_BUSY) {
       result = true;
       break;
     }

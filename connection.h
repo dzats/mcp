@@ -36,12 +36,19 @@
 #define UINT32_MAX 0xffffffff
 #endif
 
+#define PROTOCOL_VERSION 0x02 // Version of the binary protocol. Not
+  // completely implemented yet.
+
 // Some configurational constants
 #define UNICAST_PORT 6879 // default TCP port used for the unicast connections
 #define MULTICAST_PORT 6879 // default UDP port used for the multicast
   // connections
 #define MAX_ERROR_LENGTH 1200 // max length of the error messages
-#define DEFAULT_MULTICAST_ADDR "239.250.17.7"
+
+#define DEFAULT_MULTICAST_ADDR "239.250.11.7"
+#define MULTICAST_EPHEMERAL_ADDR_RANGE "239.251.0.0"
+#define MULTICAST_EPHEMERAL_ADDR_MASK "255.255.0.0"
+
 #define UDP_MAX_LENGTH 65536 // Max length for a UDP datagram
 #define MAX_UDP_PACKET_SIZE 1472 // Max length for an unfragmented UDP datagram
 #define UDP_PACKET_DATA_OVERHEAD 28 // IP header + UDP header
@@ -60,6 +67,8 @@
 #define STATUS_TOO_MANY_RETRANSMISSIONS 132
 #define STATUS_FATAL_DISK_ERROR 133
 #define STATUS_SERVER_IS_BUSY 150
+#define STATUS_PORT_IN_USE 151 // UDP port requested by the multicast sender is
+  // already in use
 #define STATUS_UNKNOWN_ERROR 171
 
 // Types of the multicast messages
@@ -285,6 +294,22 @@ public:
 
   void set_number(uint32_t n) { number = htonl(n); }
   void set_responder(uint32_t id) { responder = htonl(id); }
+} __attribute__((packed));
+
+struct MulticastInitData
+{
+private:
+  uint32_t version_and_unused; // 8-bit protocol version + 24-bit unused
+  uint32_t ephemeral_address; // ephemeral multicast address for this
+    // particular session
+public:
+  MulticastInitData(uint8_t version, uint32_t address)
+  {
+    version_and_unused = htonl(version);
+    ephemeral_address = htonl(address);
+  }
+  uint8_t get_version() const { return (uint8_t)ntohl(version_and_unused); }
+  uint32_t get_ephemeral_address() const { return ntohl(ephemeral_address); }
 } __attribute__((packed));
 
 /*
