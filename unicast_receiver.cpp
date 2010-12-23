@@ -399,7 +399,7 @@ int UnicastReceiver::session()
           if (memcmp(signature, checksum.signature,
               sizeof(signature)) != 0) {
             SERROR("Received checksum differs from the calculated one\n");
-            errors.add(new Reader::FileRetransRequest(
+            add_error(new FileRetransRequest(
               fname, finfo, local_address, destinations));
             reader.status = STATUS_INCORRECT_CHECKSUM;
           }
@@ -424,9 +424,9 @@ int UnicastReceiver::session()
       // Send errors to the source
       if (status != STATUS_OK) {
         DEBUG("Some destinations finished with errors (%d)\n", status);
-        errors.send_first(sock);
+        send_first_error(sock);
         if (status >= STATUS_FIRST_FATAL_ERROR) {
-          errors.send(sock);
+          send_errors(sock);
           finish_work();
           return EXIT_FAILURE;
         }
@@ -436,7 +436,7 @@ int UnicastReceiver::session()
       checksum.final();
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Network error during transmission: %s\n", e.what());
-      errors.send(sock);
+      send_errors(sock);
       return EXIT_FAILURE;
     }
   }

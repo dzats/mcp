@@ -3,11 +3,9 @@
 
 #include <sys/param.h> // for MAXPATHLEN
 
-#include <exception>
-#include <vector>
-
 #include "reader.h"
 #include "path.h"
+#include "connection.h"
 
 // class that reads sources from disk or from the unicast network connection
 class UnicastReceiver : public Reader

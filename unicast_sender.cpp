@@ -98,7 +98,7 @@ void UnicastSender::register_error(uint8_t status,
     strlen(error) + 1); // a bit more that required
   sprintf((char *)error_message, fmt, hostaddr, error);
   DEBUG("register error: %s\n", error_message);
-  reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
+  reader->add_error(new SimpleError(status, INADDR_NONE,
     error_message, strlen(error_message)));
   if (reader->unicast_sender.status < status) {
     reader->unicast_sender.status = status;
@@ -268,7 +268,7 @@ uint8_t UnicastSender::session_init(const std::vector<Destination>& dst,
         }
 #endif
         // Register the error
-        reader->errors.add(new Reader::SimpleError(h.get_status(),
+        reader->add_error(new SimpleError(h.get_status(),
           h.get_address(), reply_message, h.get_msg_length()));
         if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -292,7 +292,7 @@ uint8_t UnicastSender::session_init(const std::vector<Destination>& dst,
       ReplyHeader h;
       h.recv_reply(sock, &reply_message, 0);
       while (h.get_status() != STATUS_OK) {
-        reader->errors.add(new Reader::SimpleError(h.get_status(),
+        reader->add_error(new SimpleError(h.get_status(),
           h.get_address(), reply_message, h.get_msg_length()));
         if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -351,7 +351,7 @@ uint8_t UnicastSender::session()
           } else if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
             // Request for the file retransmission (done by the previous code)
             SDEBUG("Incorrect checksum, request for a file retransmission\n");
-            reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
+            reader->add_error(new FileRetransRequest(h.get_address(),
               reply_message, h.get_msg_length()));
             if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -361,7 +361,7 @@ uint8_t UnicastSender::session()
           } else if(h.get_status() != STATUS_OK) {
             // Fatal error occurred during the connection
             SDEBUG("An error received\n");
-            reader->errors.add(new Reader::SimpleError(h.get_status(),
+            reader->add_error(new SimpleError(h.get_status(),
               h.get_address(), reply_message, h.get_msg_length()));
             if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -455,7 +455,7 @@ uint8_t UnicastSender::session()
           if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
             // Request for the file retransmission (done by the previous code)
             SDEBUG("Incorrect checksum, request for a file retransmission\n");
-            reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
+            reader->add_error(new FileRetransRequest(h.get_address(),
               reply_message, h.get_msg_length()));
             if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -470,7 +470,7 @@ uint8_t UnicastSender::session()
             }
             if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
               // Finish work in the case of a fatal error
-              reader->errors.add(new Reader::SimpleError(h.get_status(),
+              reader->add_error(new SimpleError(h.get_status(),
                 h.get_address(), reply_message, h.get_msg_length()));
               if (h.get_msg_length() > 0) { free(reply_message); }
 
@@ -481,10 +481,10 @@ uint8_t UnicastSender::session()
             } else {
               if (mode == client_mode) {
                 // Display non-fatal errors immediately
-                Reader::SimpleError(h.get_status(), h.get_address(),
+                SimpleError(h.get_status(), h.get_address(),
                   reply_message, h.get_msg_length()).display();
               } else {
-                reader->errors.add(new Reader::SimpleError(h.get_status(),
+                reader->add_error(new SimpleError(h.get_status(),
                   h.get_address(), reply_message, h.get_msg_length()));
               }
               if (h.get_msg_length() > 0) { free(reply_message); }
@@ -504,7 +504,7 @@ uint8_t UnicastSender::session()
       ReplyHeader h;
       h.recv_reply(sock, &reply_message, 0);
       while (h.get_status() != STATUS_OK) {
-        reader->errors.add(new Reader::SimpleError(h.get_status(),
+        reader->add_error(new SimpleError(h.get_status(),
           h.get_address(), reply_message, h.get_msg_length()));
         if (h.get_msg_length() > 0) { free(reply_message); }
 

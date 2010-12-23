@@ -5,6 +5,7 @@ file_reader.o \
 unicast_sender.o \
 multicast_sender.o \
 distributor.o \
+errors.o \
 connection.o \
 multicast_send_queue.o
 MCPD_OBJECTS = mcpd.o \
@@ -20,6 +21,7 @@ multicast_error_queue.o \
 file_writer.o \
 path.o \
 distributor.o \
+errors.o \
 connection.o
 
 DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d)

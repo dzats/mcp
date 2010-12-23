@@ -22,7 +22,7 @@ void FileWriter::register_error(uint8_t status, const char *fmt,
   char *error_message = (char *)malloc(error_length);
   sprintf((char *)error_message, fmt, filename, error);
   DEBUG("%s\n", error_message);
-  reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
+  reader->add_error(new SimpleError(status, INADDR_NONE,
     error_message, strlen(error_message)));
   reader->file_writer.status = status;
   // Finish the file writer
@@ -150,7 +150,7 @@ int FileWriter::session()
         }
         if (memcmp(checksum.signature, this->checksum()->signature,
             sizeof(checksum.signature)) != 0) {
-          reader->errors.add(new Reader::FileRetransRequest(
+          reader->add_error(new FileRetransRequest(
             op->get_filename(), op->fileinfo, unicast_receiver->local_address,
             unicast_receiver->destinations));
           reader->file_writer.status = STATUS_INCORRECT_CHECKSUM;

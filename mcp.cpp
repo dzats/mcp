@@ -691,7 +691,7 @@ int main(int argc, char **argv)
     free(filename_offsets);
   
     // Check if some file retransmissions required
-    filenames = source_reader->errors.get_retransmissions(&dst,
+    filenames = source_reader->get_retransmissions(&dst,
       &filename_offsets);
     if (dst.size() == 0) {
       // Finish work, no retransmissions required

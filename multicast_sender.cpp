@@ -17,6 +17,8 @@
 using namespace std;
 
 #include "multicast_sender.h"
+#include "multicast_send_queue.h"
+#include "destination.h"
 
 // A helper function that chooses a UDP port and binds socket with it
 uint16_t MulticastSender::choose_ephemeral_port(bool use_global_multicast)
@@ -77,7 +79,7 @@ void MulticastSender::register_error(uint8_t status, const char *fmt,
   char *error_message = (char *)malloc(strlen(fmt) + strlen(error) + 1);
   sprintf((char *)error_message, fmt, error);
   DEBUG("register error: %s\n", error_message);
-  reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
+  reader->add_error(new SimpleError(status, INADDR_NONE,
     error_message, strlen(error_message)));
   reader->update_multicast_sender_status(status);
   // Finish the multicast sender
@@ -236,7 +238,7 @@ void MulticastSender::multicast_delivery_control()
               // Add message into the error queue
               if (mmh->get_message_type() == MULTICAST_ERROR_MESSAGE) {
                 ReplyHeader *rh = (ReplyHeader *)(mmh + 1);
-                reader->errors.add(new Reader::SimpleError(rh->get_status(),
+                reader->add_error(new SimpleError(rh->get_status(),
                   rh->get_address(), (char *)(rh + 1), rh->get_msg_length()));
                 reader->update_multicast_sender_status(rh->get_status());
                 if (rh->get_status() >= STATUS_FIRST_FATAL_ERROR) {
@@ -249,7 +251,7 @@ void MulticastSender::multicast_delivery_control()
                 assert(mmh->get_message_type() ==
                   MULTICAST_FILE_RETRANS_REQUEST);
                 FileInfoHeader *fih = (FileInfoHeader *)(mmh + 1);
-                reader->errors.add(new Reader::FileRetransRequest(
+                reader->add_error(new FileRetransRequest(
                   (char *)(fih + 1), // file name
                   *fih, mmh->get_responder(), vector<Destination>())); 
                 reader->update_multicast_sender_status(
@@ -821,7 +823,7 @@ int MulticastSender::session_init(
               inet_ntop(AF_INET, &source_ip, source_addr, sizeof(source_addr)));
 #endif
             if (find(hr_begin, hr_end, hr_p) != hr_end) {
-              reader->errors.add(new Reader::SimpleError(rh->get_status(),
+              reader->add_error(new SimpleError(rh->get_status(),
                 rh->get_address(), (char *)(rh + 1), rh->get_msg_length()));
               reader->update_multicast_sender_status(rh->get_status());
               if (rh->get_status() >= STATUS_FIRST_FATAL_ERROR) {
