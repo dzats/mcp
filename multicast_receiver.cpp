@@ -576,7 +576,7 @@ int MulticastReceiver::session()
   size_t length;
   MulticastMessageHeader *mmh =
     (MulticastMessageHeader *)message_queue.get_message(&length);
-  do {
+  while (mmh != NULL) {
     // Do something with the message
     switch (mmh->get_message_type()) {
       case MULTICAST_TARGET_PATHS: {
@@ -796,7 +796,7 @@ int MulticastReceiver::session()
         DEBUG("Message of unknown type %d received\n", mmh->get_message_type());
     }
     mmh = (MulticastMessageHeader *)message_queue.get_message(&length);
-  } while (mmh != NULL);
+  }
   return EXIT_FAILURE;
 }
 
