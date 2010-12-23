@@ -1,20 +1,19 @@
 #ifndef UNICAST_SENDER_H_HEADER
 #define UNICAST_SENDER_H_HEADER 1
-
-#include "destination.h"
-#include "distributor.h"
-#include "connection.h"
-
 #include <string>
 #include <vector>
 
 #include <netinet/in.h> // for in_addr_t
 
-// Structure for send file to a destination.
-// One socket writer per session
+#include "destination.h"
+#include "distributor.h"
+#include "connection.h"
+
+// Objects that sends files to the next unicast destination in the pipe
 class UnicastSender : public Distributor::Writer {
 	// configuration constants
 	static const int MAX_INITIALIZATION_RETRIES = 3;
+
 	int sock;
 	uint16_t port;
 

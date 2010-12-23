@@ -19,7 +19,9 @@ void Distributor::display_error() {
 			unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
 		if (unicast_sender.addr != INADDR_NONE) {
 			struct in_addr addr = {unicast_sender.addr};
-			ERROR("from host %s: %s\n", inet_ntoa(addr),
+			char host_addr[INET_ADDRSTRLEN];
+			ERROR("from host %s: %s\n",
+				inet_ntop(AF_INET, &addr, host_addr, sizeof(host_addr)),
 				unicast_sender.message);
 		} else {
 			ERROR("%s\n", unicast_sender.message);
@@ -42,8 +44,12 @@ void Distributor::send_fatal_error(int sock) {
 		else if (unicast_sender.is_present &&
 				unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
 			struct in_addr addr = {unicast_sender.addr};
+#ifndef NDEBUG
+			char host_addr[INET_ADDRSTRLEN];
 			DEBUG("Unicast Sender finished with the error: (%s) %s\n",
-				inet_ntoa(addr), unicast_sender.message);
+				inet_ntop(AF_INET, &addr, host_addr, sizeof(host_addr)),
+				unicast_sender.message);
+#endif
 			send_error(sock, unicast_sender.status,
 				unicast_sender.addr, unicast_sender.message_length,
 				unicast_sender.message);
@@ -356,8 +362,14 @@ int Distributor::Writer::write_to_file(int fd) {
 		if (count > 0) {
 			update_position(count);
 		} else {
+			if (errno == ENOBUFS) {
+				SDEBUG("ENOBUFS error occurred\n");
+				usleep(200000);
+				continue;
+			}
 			return errno;
 		}
+
 		count = get_data();
 		count = std::min(count, 16384);
 	}

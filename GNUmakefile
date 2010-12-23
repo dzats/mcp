@@ -1,19 +1,46 @@
-COMMON_OBJECTS = md5.o reader.o unicast_sender.o file_writer.o distributor.o connection.o
-UNCOMMON_OBJECTS = mcp.o mcpd.o
+MCP_OBJECTS = mcp.o \
+md5.o \
+reader.o \
+file_reader.o \
+unicast_sender.o \
+multicast_sender.o \
+distributor.o \
+connection.o \
+multicast_send_queue.o
+MCPD_OBJECTS = mcpd.o \
+md5.o \
+reader.o \
+unicast_receiver.o \
+unicast_sender.o \
+multicast_sender.o \
+file_writer.o \
+path.o \
+distributor.o \
+connection.o \
+multicast_send_queue.o
+MULTICAST_RECEIVER_OBJECTS = multicast_receiver.o \
+connection.o \
+path.o \
+md5.o \
+multicast_recv_queue.o
 
-DEP_FILES = $(COMMON_OBJECTS:.o=.d) $(UNCOMMON_OBJECTS:.o=.d)
+DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d) \
+$(MULTICAST_RECEIVER_OBJECTS:.o=.d)
 
 #CXXFLAGS += -ggdb -Wall
 CXXFLAGS += -DNDEBUG -O2
 
-PROGRAMS = mcp mcpd
+PROGRAMS = mcp mcpd multicast_receiver
 
 all: $(PROGRAMS)
 
-mcp: mcp.o $(COMMON_OBJECTS)
+mcp: $(MCP_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
 
-mcpd: mcpd.o $(COMMON_OBJECTS)
+mcpd: $(MCPD_OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+
+multicast_receiver: $(MULTICAST_RECEIVER_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
 
 sinclude $(DEP_FILES)
@@ -22,6 +49,7 @@ sinclude $(DEP_FILES)
 	@$(CXX) -MM $< >$@
 
 clean:
-	rm -f $(PROGRAMS) $(COMMON_OBJECTS) $(UNCOMMON_OBJECTS) $(DEP_FILES)
+	rm -f $(PROGRAMS) $(MCP_OBJECTS) $(MCPD_OBJECTS) $(MULTICAST_RECEIVER_OBJECTS) \
+$(DEP_FILES)
 
 .PHONY: clean

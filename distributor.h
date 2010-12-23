@@ -67,7 +67,7 @@ public:
 	static const unsigned DEFAULT_BUFFER_SIZE = (DEFAULT_BUFFER_MASK + 1);
 	MD5sum checksum;
 
-private:
+protected:
 	// State signaling variables
 	pthread_mutex_t _mutex; // mutex that protect changes of offset and state
 	pthread_cond_t space_ready_cond; // State change condition
@@ -191,8 +191,6 @@ public:
 
 	// Sends the occurred error to the imediate source
 	void send_fatal_error(int sock);
-
-	friend class Reader;
 };
 
 // The Writer class describing work of an abstract writer with the buffer
@@ -205,6 +203,15 @@ protected:
 			w(worker) {
 		assert(!w->is_present);
 		w->is_present = true;
+	}
+	~Writer() {
+		pthread_mutex_lock(&buff->_mutex);
+		w->is_present = false;
+		pthread_cond_signal(&buff->space_ready_cond);
+		if (buff->all_writers_done()) {
+			pthread_cond_signal(&buff->writers_finished_cond);
+		}
+		pthread_mutex_unlock(&buff->_mutex);
 	}
 
 	Distributor::TaskHeader* get_task() {
@@ -276,7 +283,7 @@ inline int Distributor::_get_space() {
 	}
 	if (multicast_sender.is_present && !multicast_sender.is_done) {
 		count = std::min(count, DEFAULT_BUFFER_SIZE - (reader_offset -
-			unicast_sender.offset));
+			multicast_sender.offset));
 	}
 	return count;
 }

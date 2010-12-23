@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/time.h> // for gettimeofday
 #include <netinet/in.h>
 
 #include <sys/stat.h>
@@ -26,7 +27,7 @@
 #include "connection.h"
 #include "distributor.h"
 
-#include "reader.h"
+#include "unicast_receiver.h"
 #include "unicast_sender.h"
 #include "file_writer.h"
 
@@ -74,19 +75,6 @@ void *unicast_sender_routine(void *args) {
 	return NULL;
 }
 
-#if 0
-// Arguments are: file descriptor (socket), the buff pointer
-// and addresses of the destinations.
-void *multicast_sender(void *arg)
-{
-	while (1) {
-		// TODO: send file
-		// TODO: wait for the file integrity replies (checksum)
-		// TODO: inform the socket reader about the result
-	}
-}
-#endif
-
 #ifndef NDEBUG
 void sigpipe_handler(int signum) {
 	// It is wrong to call printf here
@@ -106,9 +94,14 @@ void sigchld_handler(int signum) {
 
 int main(int argc, char **argv) {
 	// Server configurations
-	in_addr_t address = INADDR_ANY;
+	in_addr_t address = htonl(INADDR_ANY);
 	uint16_t port = UNICAST_PORT;
 	bool debug_mode = false;
+
+	// Set speed for the pseudo-random numbers
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	srand((tv.tv_sec << 8) + getpid() % (1 << 8));
 
 	// Parse the command line options
 	int ch;
@@ -224,15 +217,10 @@ int main(int argc, char **argv) {
 					exit(EXIT_FAILURE);
 				}
 			}
-			// TODO: When the code will be stable enough implement the
-			// forked server here.
 #ifndef NDEBUG
-			char inet_addr[INET_ADDRSTRLEN];
-			if (inet_ntop(AF_INET, &client_addr.sin_addr.s_addr,
-					(char *)&inet_addr, INET_ADDRSTRLEN) == NULL) {
-				exit(EXIT_FAILURE);
-			}
-			DEBUG("Received connection from: %s\n", inet_addr);
+			char iaddr[INET_ADDRSTRLEN];
+			DEBUG("Received connection from: %s\n",
+				inet_ntop(AF_INET, &client_addr.sin_addr.s_addr, iaddr, sizeof(iaddr)));
 #endif
 
 			// Session initialization
@@ -240,10 +228,9 @@ int main(int argc, char **argv) {
 			pthread_t usender_thread;
 			bool usender_started = false;
 			pthread_t fwriter_thread;
-			Distributor *buff = new Distributor();
-			Reader *socket_reader = new Reader(buff);
-			FileWriter *file_writer = new FileWriter(buff); 
-			if (socket_reader->session_init(client_sock) != 0) {
+			UnicastReceiver *unicast_receiver = new UnicastReceiver();
+			FileWriter *file_writer = new FileWriter(unicast_receiver); 
+			if (unicast_receiver->session_init(client_sock) != 0) {
 				SERROR("Can't get the initial data from the server\n");
 				exit(EXIT_FAILURE);
 			}
@@ -251,13 +238,14 @@ int main(int argc, char **argv) {
 			// TODO: session_init for the multicast sender
 
 			// Run the unicast sender sender
-			if (socket_reader->dst.size() > 0) {
+			if (unicast_receiver->dst.size() > 0) {
 				usender_started = true;
-				UnicastSender *unicast_sender = new UnicastSender(buff, port);
+				UnicastSender *unicast_sender = new UnicastSender(unicast_receiver,
+					port);
 				SDEBUG("Initialize the unicast sender thread\n");
 				int retval;
-				if ((retval = unicast_sender->session_init(socket_reader->dst,
-						socket_reader->nsources)) == 0) {
+				if ((retval = unicast_sender->session_init(unicast_receiver->dst,
+						unicast_receiver->nsources)) == 0) {
 					// Start the unicast sender
 					int error;
 					if ((error = pthread_create(&usender_thread, NULL,
@@ -275,21 +263,25 @@ int main(int argc, char **argv) {
 
 			// Conform to the source that the connection established
 			try {
-				if (buff->reader.status >= STATUS_FIRST_FATAL_ERROR) {
-					send_error(client_sock, buff->reader.status,
-						buff->reader.addr, buff->reader.message_length,
-						buff->reader.message);
+				if (unicast_receiver->reader.status >= STATUS_FIRST_FATAL_ERROR) {
+					send_error(client_sock, unicast_receiver->reader.status,
+						unicast_receiver->reader.addr,
+						unicast_receiver->reader.message_length,
+						unicast_receiver->reader.message);
 					exit(EXIT_FAILURE);
-				} else if (buff->unicast_sender.is_present &&
-						buff->unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+				} else if (unicast_receiver->unicast_sender.is_present &&
+						unicast_receiver->unicast_sender.status >=
+						STATUS_FIRST_FATAL_ERROR) {
 					// A fatal error occurred during the unicast sender initialization
 					// FIXME: race condition can take place here.
-					send_error(client_sock, buff->unicast_sender.status,
-						buff->unicast_sender.addr, buff->unicast_sender.message_length,
-						buff->unicast_sender.message);
+					send_error(client_sock, unicast_receiver->unicast_sender.status,
+						unicast_receiver->unicast_sender.addr,
+						unicast_receiver->unicast_sender.message_length,
+						unicast_receiver->unicast_sender.message);
 					exit(EXIT_FAILURE);
-				} else if (buff->multicast_sender.is_present &&
-						buff->multicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+				} else if (unicast_receiver->multicast_sender.is_present &&
+						unicast_receiver->multicast_sender.status >=
+						STATUS_FIRST_FATAL_ERROR) {
 					// TODO: do the same thing as with other writers
 				}
 			} catch (ConnectionException& e) {
@@ -299,7 +291,7 @@ int main(int argc, char **argv) {
 			}
 
 			// Start the file writer thread
-			file_writer->init(socket_reader->path, socket_reader->path_type); 
+			file_writer->init(unicast_receiver->path, unicast_receiver->path_type); 
 			int error;
 			if ((error = pthread_create(&fwriter_thread, NULL,
 					file_writer_routine, (void *)file_writer)) != 0) {
@@ -309,8 +301,8 @@ int main(int argc, char **argv) {
 
 			// Start the main routine (read files and directories and pass them
 			// to the distributor)
-			if (socket_reader->session() != 0) {
-				buff->send_fatal_error(client_sock);
+			if (unicast_receiver->session() != 0) {
+				unicast_receiver->send_fatal_error(client_sock);
 			}
 
 			pthread_join(fwriter_thread, NULL);
@@ -320,8 +312,7 @@ int main(int argc, char **argv) {
 
 			SDEBUG("Session finished, terminate the server\n");
 			delete file_writer;
-			delete socket_reader;
-			delete buff;
+			delete unicast_receiver;
 			close(client_sock);
 			if (!debug_mode) {
 				exit(EXIT_SUCCESS);

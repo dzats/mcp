@@ -8,9 +8,9 @@
 #include <sys/types.h>
 #include <sys/stat.h> // for stat
 #include <sys/socket.h> // for socket
+#include <sys/time.h> // for gettimeofday
 #include <signal.h> // for SIGPIPE
 #include <netinet/in.h>
-#include <arpa/inet.h> // for inet_ntoa
 #include <dirent.h> // for opendir
 #include <pthread.h>
 #include <vector>
@@ -26,8 +26,9 @@ using namespace std;
 #include "destination.h"
 #include "connection.h"
 #include "distributor.h"
-#include "reader.h"
+#include "file_reader.h"
 #include "unicast_sender.h"
+#include "multicast_sender.h"
 #include "log.h"
 
 void usage_and_exit(char *name) {
@@ -42,14 +43,24 @@ void usage_and_exit(char *name) {
 	exit(EXIT_FAILURE);
 }
 
-// Wrapper for the Reader::read_sources function, passed
+// Wrapper for the UnicastSender::session function, passed
 // to pthread_create.
-void *source_reader_routine(void *args) {
-	Reader *s = ((Reader::ThreadArgs *)args)->source_reader;
-	char **filenames = ((Reader::ThreadArgs *)args)->filenames;
-	try {
-		s->read_sources(filenames);
-	} catch (BrokenInputException& e) {
+void *unicast_sender_routine(void *args) {
+	SDEBUG("Start the unicast sender\n");
+	UnicastSender *us = (UnicastSender *)args;
+	if (us->session() != 0) {
+		// Signal about an error
+		return (void *)-1;
+	}
+	return NULL;
+}
+
+// Wrapper for the MulticastSender::session function, passed
+// to pthread_create.
+void *multicast_sender_routine(void *args) {
+	SDEBUG("Start the multicast sender\n");
+	MulticastSender *ms = (MulticastSender *)args;
+	if (ms->session() != 0) {
 		// Signal about an error
 		return (void *)-1;
 	}
@@ -164,6 +175,11 @@ int main(int argc, char **argv) {
 	// TODO: realize behavior defined by the following flag
 	bool overwrite_files = true; // Overwrite read-only files
 	uint16_t unicast_port = UNICAST_PORT; // TCP port used for unicast connections
+
+	// Set speed for the pseudo-random numbers
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	srand((tv.tv_sec << 8) + getpid() % (1 << 8));
 
 	// Parse the command options
 	int ch;
@@ -298,46 +314,103 @@ int main(int argc, char **argv) {
 #endif
 
 	// The main objects
-	Distributor *buff = new Distributor();
-	Reader *source_reader = new Reader(buff);
-	UnicastSender *unicast_sender = new UnicastSender(buff, unicast_port);
+	FileReader *source_reader = new FileReader();
+	UnicastSender *unicast_sender = NULL;
+	MulticastSender *multicast_sender = new MulticastSender(source_reader,
+		unicast_port, nsources);
+	pthread_t unicast_sender_thread;
+	pthread_t multicast_sender_thread;
+	bool is_unicast_sender_started = false;
+	bool is_multicast_sender_started = false;
 
-	Reader::ThreadArgs freader_args = {source_reader, filenames};
-
-	// Start the filereader thread
-	pthread_t source_reader_thread;
-	int error;
-	if ((error = pthread_create(&source_reader_thread, NULL,
-			source_reader_routine, (void *)&freader_args)) != 0) {
-		ERROR("Can't create a new thread: %s\n", strerror(errno));
+	// Establish the multicast session
+	vector<Destination> *remaining_dst = multicast_sender->session_init(dst,
+		nsources);
+	if (remaining_dst == NULL) {
+		source_reader->display_error();
 		exit(EXIT_FAILURE);
 	}
-
-	// Establish unicast session
-	if (unicast_sender->session_init(dst, nsources) != 0) {
-		pthread_join(source_reader_thread, NULL);
-		buff->display_error();
-		return EXIT_FAILURE;
+	if (preserve_order) {
+		// FIXME: Do something here to implement the preserve order policy
+	}
+#ifndef NDEBUG
+	SDEBUG("Destinations unreachable through multicast:\n");
+	for (vector<Destination>::const_iterator i = remaining_dst->begin();
+			i != remaining_dst->end(); ++i) {
+		printf("%d.", (*i).addr >> 24);
+		printf("%d.", (*i).addr >> 16 & 0xFF);
+		printf("%d.", (*i).addr >> 8 & 0xFF);
+		printf("%d: ", (*i).addr & 0xFF);
+		if (i->filename != NULL) {
+			printf("%s\n", &*(i->filename));
+		} else {
+			printf("\n");
+		}
+	}
+#endif
+	// FIXME: some other evaluation should done be here
+	if (remaining_dst->size() < dst.size()) {
+		// Start the multicast sender
+		int error;
+		if ((error = pthread_create(&multicast_sender_thread, NULL,
+				multicast_sender_routine, (void *)multicast_sender)) != 0) {
+			ERROR("Can't create a new thread: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+		is_multicast_sender_started = true;
+	} else {
+		// Delete the multicast sender
+		delete multicast_sender;
+		multicast_sender = NULL;
 	}
 
-	// Execute the main routine by the unicast sender
-	if (unicast_sender->session() != 0) {
-		pthread_join(source_reader_thread, NULL);
-		buff->display_error();
-		return EXIT_FAILURE;
+	if (remaining_dst->size() > 0) {
+		unicast_sender = new UnicastSender(source_reader, unicast_port);
+		// Establish the unicast session
+		if (unicast_sender->session_init(*remaining_dst, nsources) != 0) {
+			source_reader->display_error();
+			return EXIT_FAILURE;
+		}
+
+		// Start the unicast_sender thread
+		int error;
+		if ((error = pthread_create(&unicast_sender_thread, NULL,
+				unicast_sender_routine, (void *)unicast_sender)) != 0) {
+			ERROR("Can't create a new thread: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+		is_unicast_sender_started = true;
 	}
 
-	// Wait for readers
+	delete remaining_dst;
+
+	bool display_error = false;
+	if (source_reader->read_sources(filenames) != 0) {
+		display_error = true;
+	}
+
+	// Wait for the reader and multicast_sender
 	void *result;
-	pthread_join(source_reader_thread, &result);
-	if (result != NULL) {
-		buff->display_error();
+	if (is_unicast_sender_started) {
+		pthread_join(unicast_sender_thread, &result);
+		if (result != NULL) {
+			display_error = true;
+		}
+	}
+	if (is_multicast_sender_started) {
+		pthread_join(multicast_sender_thread, &result);
+		if (result != NULL) {
+			display_error = true;
+		}
+	}
+	if (display_error) {
+		source_reader->display_error();
 	}
 
 	SDEBUG("Finished, clean up the data\n");
-	delete unicast_sender;
+	if (multicast_sender != NULL) { delete multicast_sender; }
+	if (unicast_sender != NULL) { delete unicast_sender; }
 	delete source_reader;
-	delete buff;
 	for (int i = 0; i < nsources; ++i) {
 		free(filenames[i]);
 	}
