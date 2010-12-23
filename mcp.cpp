@@ -53,7 +53,7 @@ void usage_and_exit(char *name)
   "\t-c\tVerify the file checksums twise. The second verification is\n"
   "\t\tperformed on data written to the disk.\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
-  "\t\ttransfert.\n\n");
+  "\t\ttransfert.\n");
   exit(EXIT_FAILURE);
 }
 

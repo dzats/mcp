@@ -57,6 +57,10 @@ struct MulticastConnection
 
 using namespace std;
 
+// Global variables
+uid_t uid; // User id of the daemon
+uid_t gid; // Group id of the daemon
+char *homedir; // Home directory of the daemon
 set<MulticastConnection> multicast_sessions; // Established multicast sessions
 
 void usage_and_exit(char *name)
@@ -73,7 +77,8 @@ void usage_and_exit(char *name)
   "\t-P port\n"
   "\t\tSpecify port the server will use for multicast connections\n"
   "\t\tinstead of the default port (" NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
-  "\t-u\tUnicast only (don't accept multicast connections)\n\n"
+  "\t-u UID\tChange UID, GID and home directory for the process\n\n"
+  "\t-U\tUnicast only (don't accept multicast connections)\n\n"
   "\t-m\tMulticast only (don't accept unicast connections)\n\n"
   "\t-d\tRun server in the debug mode (don't go to the background,\n"
   "\t\tlog messages to the standard out/error, and don't fork on\n"
@@ -181,6 +186,81 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
   return 0;
 }
 
+// Get UID, GID and home directory from the /etc/passwd file
+void get_uid_gid_and_homedir(const char *command)
+{
+  size_t sizeof_output = 160;
+  char *output = (char *)malloc(sizeof_output);
+  char *pointer = output;
+  FILE *f = popen(command, "r");
+  if (f == NULL) {
+    ERROR("Can't execute command %s: %s\n", command, strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  int read_result;
+  do {
+    read_result = fread(pointer, sizeof(char),
+      pointer + sizeof_output - output, f);
+    pointer += read_result;
+    if ((size_t)(pointer - output) == sizeof_output) {
+      ptrdiff_t ptr_offset = pointer - output;
+      sizeof_output *= 2;
+      output = (char *)realloc(output, sizeof_output);
+      pointer = output + ptr_offset;
+    }
+  } while (read_result != 0);
+
+  if (pointer == output) {
+    ERROR("User %s was not found in the /etc/passwd file\n", optarg);
+    exit(EXIT_FAILURE);
+  } else if (ferror(f)) {
+    ERROR("Can't read the /etc/passwd file: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  pclose(f);
+  *(pointer - 1) = '\0';
+
+  char *uid_tok, *gid_tok, *homedir_tok;
+  uid_tok = strtok(output, ":");
+  gid_tok = strtok(NULL, ":");
+  homedir_tok = strtok(NULL, ":");
+  if (uid_tok == NULL || gid_tok == NULL || homedir_tok == NULL) {
+    SERROR("Incorrect format of the /etc/passwd file\n");
+    exit(EXIT_FAILURE);
+  }
+  uid = atoi(uid_tok);
+  gid = atoi(gid_tok);
+  homedir = strdup(homedir_tok);
+  DEBUG("New UID: %u, new GID: %u, new home directory: %s\n", uid,
+    gid, homedir);
+  free(output);
+}
+
+// Change UID, GID and home directory of the daemon
+void change_user(const char *name)
+{
+  free(homedir);
+  uid = atoi(name);
+  if (uid == 0 && (name[0] != '0' || name[1] != '\0')) {
+    // The parameter specified as a string
+    // Search for UID, GID and home directory in the passwd file
+    const char *command_format =
+      "grep ^%s /etc/passwd | cut -d : -f 3,4,6";
+    char command[sizeof(command_format) + strlen(name)];
+    sprintf(command, command_format, name);
+    get_uid_gid_and_homedir(command);
+  } else {
+    // The parameter specified as a number
+    // Search for GID and home directory in the passwd file
+    const char *command_format =
+      "grep ^[^:]*:[^:]*:%s /etc/passwd | cut -d : -f 3,4,6";
+    char command[sizeof(command_format) + strlen(name)];
+    sprintf(command, command_format, name);
+    get_uid_gid_and_homedir(command);
+  }
+}
+
 int main(int argc, char **argv)
 {
   // Server configurations
@@ -193,6 +273,14 @@ int main(int argc, char **argv)
 #ifdef USE_MULTICAST
   unsigned multicast_sender_number = 0;
 #endif
+  uid = getuid();
+  gid = getgid();
+  homedir = getenv("HOME");
+  if (homedir == NULL) {
+    ERROR("Can't get the home directory: %s\n", strerror(errno));
+    homedir = "/";
+  }
+  homedir = strdup(homedir);
 
   // Set speed for the pseudo-random numbers
   struct timeval tv;
@@ -201,7 +289,7 @@ int main(int argc, char **argv)
 
   // Parse the command line options
   int ch;
-  while ((ch = getopt(argc, argv, "a:p:P:umdh")) != -1 ) {
+  while ((ch = getopt(argc, argv, "a:p:P:u:Umdh")) != -1 ) {
     switch (ch) {
       case 'a': // Address specified
         if ((address = inet_addr(optarg)) == INADDR_NONE) {
@@ -224,7 +312,10 @@ int main(int argc, char **argv)
           exit(EXIT_FAILURE);
         }
         break;
-      case 'u': // Don't accept the multicast connections
+      case 'u': // Change UID, GID and home directory for the daemon
+        change_user(optarg);
+        break;
+      case 'U': // Don't accept the multicast connections
         unicast_only = true;
         break;
       case 'm': // Don't accept the unicast connections
@@ -237,6 +328,19 @@ int main(int argc, char **argv)
       default:
         usage_and_exit(argv[0]);
     }
+  }
+        
+  if (gid != getgid() && setresgid(gid, gid, gid) != 0) {
+    ERROR("Can't change GID to %u: %s\n", gid, strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  if (uid != getuid() && setresuid(uid, uid, uid) != 0) {
+    ERROR("Can't change UID to %u: %s\n", uid, strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  if (!debug_mode && chdir(homedir) != 0) {
+    ERROR("Can't proceed to the home directory %s: %s\n", homedir,
+      strerror(errno));
   }
 
   if (multicast_only && unicast_only) {
@@ -387,12 +491,6 @@ int main(int argc, char **argv)
   // Become a daemon process and proceeed to the home directory
   if (!debug_mode) {
     daemon(1, 0);
-    char *homedir;
-    if ((homedir = getenv("HOME")) == NULL ||
-      chdir(homedir) != 0) {
-      ERROR("Can't proceed to the home directory: %s\n", strerror(errno));
-      // continue execution
-    }
   }
 
   // Start the multicast receiver
