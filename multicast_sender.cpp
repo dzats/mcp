@@ -18,7 +18,7 @@ using namespace std;
 #include "multicast_sender.h"
 
 // A helper function that chooses a UDP port and binds socket with it
-uint16_t MulticastSender::choose_ephemeral_port()
+uint16_t MulticastSender::choose_ephemeral_port(bool use_global_multicast)
 {
   uint16_t ephemeral_port;
   struct sockaddr_in ephemeral_addr;
@@ -37,12 +37,23 @@ uint16_t MulticastSender::choose_ephemeral_port()
     bind_result = bind(sock, (struct sockaddr *)&ephemeral_addr,
       sizeof(ephemeral_addr));
 
-    // Set default interface for the multicast traffic
+    // Set default interface for multicast traffic
     if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
         &ephemeral_addr.sin_addr, sizeof(ephemeral_addr.sin_addr)) != 0) {
       ERROR("Can't set default interface for outgoing multicast traffic: %s\n",
         strerror(errno));
       exit(EXIT_FAILURE);
+    }
+
+    if (use_global_multicast) {
+      // Set TTL for multicast packets
+      unsigned char ttl = 31;
+      if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL,
+          &ttl, sizeof(ttl)) != 0) {
+        ERROR("Can't set TTL for outgoing multicast packets: %s\n",
+          strerror(errno));
+        exit(EXIT_FAILURE);
+      }
     }
   } while (bind_result != 0 && tries-- > 0 && errno == EADDRINUSE);
   return bind_result == 0 ? ephemeral_port : 0;
@@ -483,7 +494,7 @@ MulticastSender *MulticastSender::create_and_initialize(
         // Establish the multicast session
         const vector<Destination> *si_result;
         si_result = multicast_sender->session_init(local_addresses[i],
-          local_destinations, n_sources);
+          local_destinations, n_sources, use_global_multicast);
         if (si_result == NULL) {
           // A fatal error occurred
           delete multicast_sender;
@@ -534,7 +545,7 @@ MulticastSender *MulticastSender::create_and_initialize(
     // Establish the multicast session
     const vector<Destination> *si_result;
     si_result = multicast_sender->session_init(multicast_interface,
-      all_destinations, n_sources);
+      all_destinations, n_sources, use_global_multicast);
     if (si_result == NULL) {
       // A fatal error occurred
       delete multicast_sender;
@@ -585,7 +596,10 @@ MulticastSender *MulticastSender::create_and_initialize(
   is a vector of destinations the connection has been established with.
 */
 const std::vector<Destination>* MulticastSender::session_init(
-    uint32_t local_addr, const std::vector<Destination>& dst, int n_sources)
+    uint32_t local_addr,
+    const std::vector<Destination>& dst,
+    int n_sources,
+    bool use_global_multicast)
 {
   // Clear the previous connection targets
   local_address = local_addr;
@@ -611,7 +625,7 @@ const std::vector<Destination>* MulticastSender::session_init(
 
   // Choose an ephemeral UDP port
   errno = 0;
-  uint16_t ephemeral_port = choose_ephemeral_port();
+  uint16_t ephemeral_port = choose_ephemeral_port(use_global_multicast);
   if (ephemeral_port == 0) {
     ERROR("Can't choose an ephemeral port: %s\n", strerror(errno));
     register_error(STATUS_UNKNOWN_ERROR,

@@ -144,8 +144,11 @@ public:
     session with the destinations specified in dst. The return value
     is a vector of destinations the connection has been established with.
   */
-  const std::vector<Destination>* session_init(uint32_t local_addr,
-    const std::vector<Destination>& dst, int n_sources);
+  const std::vector<Destination>* session_init(
+    uint32_t local_addr,
+    const std::vector<Destination>& dst,
+    int n_sources,
+    bool use_global_multicast);
 
   /*
     This is the main routine of the multicast sender. It sends
@@ -158,7 +161,7 @@ public:
 
 private:
   // A helper function that chooses a UDP port and binds socket to it
-  uint16_t choose_ephemeral_port();
+  uint16_t choose_ephemeral_port(bool use_global_multicast);
 
   // Helper fuction that sends 'message' to the udp socket.
   void udp_send(const void *message, int size, int flags);
