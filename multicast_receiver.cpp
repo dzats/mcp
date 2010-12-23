@@ -212,7 +212,7 @@ void MulticastReceiver::read_data()
   bool is_termination_request_received = false;
   uint32_t termination_request_number;
   bool is_missed_sent = false;
-  uint32_t first_after_missed = UINT32_MAX;
+  uint32_t previous_retrans = UINT32_MAX;
 
   struct sockaddr_in client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
@@ -366,8 +366,10 @@ void MulticastReceiver::read_data()
             missed_packets.size());
           // We can send a new error message
           if (is_missed_sent &&
-              cyclic_less_or_equal(message_num, first_after_missed)) {
+              cyclic_less_or_equal(message_num, previous_retrans)) {
             is_missed_sent = false;
+          } else {
+            previous_retrans = message_num;
           }
         } else {
           // Some packets lost
@@ -421,7 +423,7 @@ void MulticastReceiver::read_data()
             if (!is_missed_sent) {
               send_missed_packets(message_num);
               is_missed_sent = true;
-              first_after_missed = message_num;
+              previous_retrans = message_num;
             }
           }
         }

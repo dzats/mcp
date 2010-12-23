@@ -211,6 +211,11 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
   
   if (message_for_retransmission == NULL) {
     data_on_flow += size;
+    if (message == NULL) {
+      // The request is simpy a check, whether some messages
+      // should be retransmitted.
+      return NULL;
+    }
   } else {
     data_on_flow += *retrans_message_size;
   }
@@ -234,6 +239,7 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
     }
 
     // Put message into the buffer
+    assert(store_position < buffer.size());
     gettimeofday(&current_time, NULL);
     buffer[store_position]->size = size;
     buffer[store_position]->timestamp = current_time;
@@ -310,9 +316,12 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
       assert(first_to_acknowledge[i] < INT_MAX);
     }
     // Move all the acknowledged elements to the queue's tail
-    buffer.insert(buffer.end(), buffer.begin(),
-      buffer.begin() + min_to_acknowledge);
-    buffer.erase(buffer.begin(), buffer.begin() + min_to_acknowledge);
+    unsigned i = min_to_acknowledge;
+    for (;i > 0; --i) {
+      MessageRecord *swp = buffer.front();
+      buffer.pop_front();
+      buffer.push_back(swp);
+    }
     store_position -= min_to_acknowledge;
     assert(store_position < INT_MAX);
     if (is_queue_full) {
@@ -371,7 +380,7 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
   // FIXME: Check whether the algorithm is acceptable
   buffer[offset]->timestamp = (struct timeval){0, 0};
   ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
-  window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
+  window_size = ssthresh + (ssthresh >> 1) + MAX_UDP_PACKET_SIZE * 3;
   DEBUG("New window size: %u\n", window_size);
   pthread_mutex_unlock(&mutex);
 }

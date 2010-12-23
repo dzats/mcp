@@ -718,6 +718,21 @@ int MulticastSender::session()
           } else if (wait_result == 0) {
             break;
           }
+
+          // Retransmit some error messages if required
+          void *retrans_message;
+          size_t retrans_message_size;
+          retrans_message = send_queue->store_message(NULL, 0,
+            &retrans_message_size);
+          while (retrans_message != NULL) {
+            DEBUG("Retransmit message %u\n",
+              ((MulticastMessageHeader *)retrans_message)->get_number());
+            udp_send(retrans_message, retrans_message_size, 0);
+            retrans_message = send_queue->store_message(NULL, 0,
+              &retrans_message_size);
+          }
+
+          // Retransmit the session termination request
           udp_send(message, size, 0);
 
           gettimeofday(&current_time, NULL);
