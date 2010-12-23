@@ -58,23 +58,15 @@ public:
   };
 
 private:
+  // Internal distributor's data
   Errors errors;
   TaskHeader operation;
   uint8_t *buffer;
-public:
-  // Objects connected to the distributor
-  volatile Client reader; // The object that reads tasks and data from disk or
-    // network and passes them to the distributor
-  volatile Client file_writer; // the file reader object
-  volatile Client unicast_sender; // the unicast sender object
-  volatile Client multicast_sender; // the multicast sender object
 
   static const unsigned DEFAULT_BUFFER_MASK = 0xFFFFF; // must be equal
     // to 2^n - 1
   static const unsigned DEFAULT_BUFFER_SIZE = (DEFAULT_BUFFER_MASK + 1);
-  MD5sum checksum;
 
-protected:
   // State signaling variables
   pthread_mutex_t mutex; // mutex that protect changes of offset and state
   pthread_cond_t space_ready_cond; // State change condition
@@ -85,47 +77,27 @@ protected:
   pthread_cond_t writers_finished_cond; // The current operation is finished
     // by the all the writers
 
-  // protect from copying
-  Distributor(const Distributor&);
-  Distributor& operator=(const Distributor&);
+  // Internal distributor's routines
 
-  /*
-    Internal funcion that return space available for write
-    mutex should be locked.
-  */
-  int _get_space();
+  // Returns space available for write. Mutex should be locked.
+  int _get_space() const;
+  // Returns space available for read. Mutex should be locked.
+  inline int _get_data(int offset) const;
+  // Return true if all the writers are finished.
+  inline bool all_writers_done() const;
+  // Return true if all the writers and the reader are finished.
+  bool all_done() const { return reader.is_done && all_writers_done(); }
 
-  /*
-    Internal funcion that return space available for read
-    mutex should be locked.
-  */
-  inline int _get_data(int offset);
+protected:
+  // Reader's interfaces
 
-  bool all_writers_done()
-  {
-    return (!file_writer.is_present || file_writer.is_done) &&
-      (!unicast_sender.is_present || unicast_sender.is_done) &&
-      (!multicast_sender.is_present || multicast_sender.is_done);
-  }
+  volatile Client reader; // The object that reads tasks and data from disk or
+    // network and passes them to the distributor
+  MD5sum checksum;
 
-  bool all_done()
-  {
-    return reader.is_done && all_writers_done();
-  }
-
-  /*
-    Return free space available for write, blocks until
-    the space will be available. Can be called only by the
-    reader.
-  */
+  // Return free space available for write, blocks until
+  // the space will be available. Can be called only by the reader.
   int get_space();
-
-  /*
-    Return free space available for read, blocks until
-    the space will be available. Can be called only by the
-    reader.
-  */
-  int get_data(Client *w);
 
   /*
     Move reader.offset to the count bytes right (cyclic)
@@ -136,15 +108,6 @@ protected:
   void *rposition()
   {
     return buffer + (reader.offset & DEFAULT_BUFFER_MASK);
-  }
-
-  // Move w->offset to the count bytes left (cyclic)
-  // Count should not be greater than zero.
-  void update_writer_position(int count, Client *w);
-
-  void *wposition(Client *w)
-  {
-    return buffer + (w->offset & DEFAULT_BUFFER_MASK);
   }
 
   // Adds a new task to the buffer, block until the previous task finished
@@ -166,7 +129,6 @@ protected:
   // Put data into the buffer, checksum is not changed
   void put_data_without_checksum_update(void *data, int size);
 
-public:
   Distributor();
 
   ~Distributor()
@@ -179,6 +141,34 @@ public:
     pthread_mutex_destroy(&mutex);
   }
 
+public:
+  // Writers' interfaces
+  volatile Client file_writer; // the file reader object
+  volatile Client unicast_sender; // the unicast sender object
+  volatile Client multicast_sender; // the multicast sender object
+
+  // Drop one of the writers. It can be useful if some fatal error occurred.
+  inline void drop_writer(Client* w);
+  // Get new task for the current writer.
+  inline TaskHeader * get_writer_task(Client * w);
+  // Submit that all the data has been written.
+  inline void submit_writer_task(Client * w);
+
+  // Return the space available for read, blocks until
+  // the space will be available. Can be called only by the
+  // reader.
+  int get_data(Client *w);
+
+  // Get position for the current writer
+  void *wposition(Client *w)
+  {
+    return buffer + (w->offset & DEFAULT_BUFFER_MASK);
+  }
+
+  // Move w->offset to the count bytes left (cyclic)
+  // Count should not be greater than zero.
+  void update_writer_position(int count, Client *w);
+
   // Updates status of the multicast sender (thread safe)
   void update_multicast_sender_status(uint8_t status) {
     pthread_mutex_lock(&mutex);
@@ -187,6 +177,9 @@ public:
     }
     pthread_mutex_unlock(&mutex);
   }
+
+  // Return pointer to the calculated checksum
+  const MD5sum* get_checksum() const { return &checksum; }
 
   // Wrapper funtions for the errors object.
   inline void add_error(ErrorMessage * error_message)
@@ -211,14 +204,15 @@ public:
     return errors.get_retransmissions(dest, filename_offsets);
   };
 
-  friend class Writer;
+private:
+  // protect from copying
+  Distributor(const Distributor&);
+  Distributor& operator=(const Distributor&);
 };
 
-/*
-  Internal funcion that return space available for read
-  mutex should be locked.
-*/
-inline int Distributor::_get_data(int offset)
+// Internal funcion that return space available for read
+// mutex should be locked.
+inline int Distributor::_get_data(int offset) const
 {
   register unsigned count = DEFAULT_BUFFER_SIZE - offset;
   if (count > 0) {
@@ -229,11 +223,9 @@ inline int Distributor::_get_data(int offset)
   return count;
 }
 
-/*
-  Internal funcion that return space available for write
-  mutex should be locked.
-*/
-inline int Distributor::_get_space()
+// Internal funcion that return space available for write
+// mutex should be locked.
+inline int Distributor::_get_space() const
 {
   register int reader_offset = reader.offset;
   unsigned count = DEFAULT_BUFFER_SIZE - (reader_offset & DEFAULT_BUFFER_MASK);
@@ -250,5 +242,53 @@ inline int Distributor::_get_space()
       multicast_sender.offset));
   }
   return count;
+}
+
+// Return true if all the writers are finished.
+inline bool Distributor::all_writers_done() const {
+  return (!file_writer.is_present || file_writer.is_done) &&
+    (!unicast_sender.is_present || unicast_sender.is_done) &&
+    (!multicast_sender.is_present || multicast_sender.is_done);
+}
+
+// Drop one of the writers. It can be useful if some fatal error occurred.
+inline void Distributor::drop_writer(Distributor::Client* w)
+{
+  pthread_mutex_lock(&mutex);
+  w->is_present = false;
+  w->status = STATUS_OK;
+  w->is_done = true;
+  pthread_cond_signal(&space_ready_cond);
+  if (all_writers_done()) {
+    pthread_cond_signal(&writers_finished_cond);
+  }
+  pthread_mutex_unlock(&mutex);
+}
+
+// Get new task for the current writer.
+inline Distributor::TaskHeader* Distributor::get_writer_task(
+    Distributor::Client* w)
+{
+  pthread_mutex_lock(&mutex);
+  while (w->is_done && w->status < STATUS_FIRST_FATAL_ERROR) {
+    // Wait for the new task become available
+    pthread_cond_wait(&operation_ready_cond, &mutex);
+  }
+  pthread_mutex_unlock(&mutex);
+  return &operation;
+}
+
+// Submit that all the data has been written.
+inline void Distributor::submit_writer_task(Distributor::Client* w)
+{
+  pthread_mutex_lock(&mutex);
+  w->is_done = true;
+  if (w->status != STATUS_OK) {
+    pthread_cond_signal(&space_ready_cond);
+  }
+  if (all_writers_done()) {
+    pthread_cond_signal(&writers_finished_cond);
+  }
+  pthread_mutex_unlock(&mutex);
 }
 #endif

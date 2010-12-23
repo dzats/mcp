@@ -21,39 +21,17 @@ protected:
   }
   ~Writer()
   {
-    pthread_mutex_lock(&reader->mutex);
-    w->is_present = false;
-    w->status = STATUS_OK;
-    w->is_done = true;
-    pthread_cond_signal(&reader->space_ready_cond);
-    if (reader->all_writers_done()) {
-      pthread_cond_signal(&reader->writers_finished_cond);
-    }
-    pthread_mutex_unlock(&reader->mutex);
+    reader->drop_writer(w);
   }
 
   Reader::TaskHeader* get_task()
   {
-    pthread_mutex_lock(&reader->mutex);
-    while (w->is_done && w->status < STATUS_FIRST_FATAL_ERROR) {
-      // Wait for the new task become available
-      pthread_cond_wait(&reader->operation_ready_cond, &reader->mutex);
-    }
-    pthread_mutex_unlock(&reader->mutex);
-    return &reader->operation;
+    return reader->get_writer_task(w);
   }
 
   void submit_task()
   {
-    pthread_mutex_lock(&reader->mutex);
-    w->is_done = true;
-    if (w->status != STATUS_OK) {
-      pthread_cond_signal(&reader->space_ready_cond);
-    }
-    if (reader->all_writers_done()) {
-      pthread_cond_signal(&reader->writers_finished_cond);
-    }
-    pthread_mutex_unlock(&reader->mutex);
+    return reader->submit_writer_task(w);
   }
 
   int get_data() { return reader->get_data(w); }
@@ -63,6 +41,6 @@ protected:
   }
   void *pointer() { return reader->wposition(w); }
   // Checksum of the last file received
-  MD5sum* checksum() { return &reader->checksum; }
+  const MD5sum* checksum() { return reader->get_checksum(); }
 };
 #endif
