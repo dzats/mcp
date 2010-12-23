@@ -297,16 +297,13 @@ void MulticastSender::mcast_send(const void *message, int size)
   MulticastMessageHeader *mmh = (MulticastMessageHeader *)message;
   mmh->set_number(next_message);
   ++next_message;
-  // Add noreply frames to implement a part of the control flow (don't shure
-  // that it will be useful
-  if (next_responder < targets.size()) {
-    mmh->set_responder(targets[next_responder].addr);
+  // Add noreply frames to decrease the number of acknowledgements
+  if ((next_responder & 1) == 0) {
+    mmh->set_responder(targets[next_responder >> 1].addr);
   } else {
     mmh->set_responder(INADDR_NONE);
   }
-  // TODO: add some percentage of unacknowledged packets depending
-  // on the window size
-  next_responder = (next_responder + 1) % (targets.size() * 2);
+  next_responder = (next_responder + 1) % (targets.size() << 1);
 
   // Store message for the possibility of the future retransmissions.
   // (can block)
