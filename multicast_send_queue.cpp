@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <sys/time.h>
+#include <limits.h>
 
 #include "multicast_send_queue.h"
 
