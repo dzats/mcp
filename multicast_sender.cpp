@@ -723,7 +723,7 @@ const std::vector<Destination>* MulticastSender::session_init(
             uint32_t *end = (uint32_t* )(buffer + length);
             // Need to store only the first address
             bool is_address_alredy_matched = false;
-            do {
+            while (p < end) {
               MulticastHostRecord *found_record;
               MulticastHostRecord hr_p(ntohl(*p));
 #ifndef NDEBUG
@@ -754,15 +754,21 @@ const std::vector<Destination>* MulticastSender::session_init(
                 init_message_length -= sizeof(MulticastHostRecord);
               }
               ++p;
-            } while (p < end);
+            }
             if (remaining_dst->size() == 0) {
               // All the destinations responded
               goto finish_session_initialization;
             }
-          } else {
-            if (mih->get_message_type() == MULTICAST_ERROR_MESSAGE) {
-              ReplyHeader *rh = (ReplyHeader *)(mih + 1);
-              DEBUG("Error (%u) received\n", rh->get_status());
+          } else if (mih->get_message_type() == MULTICAST_ERROR_MESSAGE) {
+            ReplyHeader *rh = (ReplyHeader *)(mih + 1);
+            MulticastHostRecord hr_p(rh->get_address());
+#ifndef NDEBUG
+            uint32_t source_ip = htonl(rh->get_address());
+            char source_addr[INET_ADDRSTRLEN];
+            DEBUG("Error %u received from %s\n", rh->get_status(),
+              inet_ntop(AF_INET, &source_ip, source_addr, sizeof(source_addr)));
+#endif
+            if (find(hr_begin, hr_end, hr_p) != hr_end) {
               reader->errors.add(new Reader::SimpleError(rh->get_status(),
                 rh->get_address(), (char *)(rh + 1), rh->get_msg_length()));
               reader->update_multicast_sender_status(rh->get_status());
@@ -775,10 +781,10 @@ const std::vector<Destination>* MulticastSender::session_init(
                 abnormal_termination();
                 return NULL;
               }
-            } else {
-              DEBUG("Message of unknown type %x received\n",
-                mih->get_message_type());
             }
+          } else {
+            DEBUG("Message of unknown type %x received\n",
+              mih->get_message_type());
           }
         } else if (poll_result == 0) {
           // Time expired, send the next message

@@ -62,7 +62,8 @@ struct MulticastConnectionPidCompare
   pid_t pid;
 public:
   MulticastConnectionPidCompare(pid_t p) : pid(p) {}
-  bool operator()(const MulticastConnection& arg) {
+  bool operator()(const MulticastConnection& arg)
+  {
     return pid == arg.pid;
   }
 };
