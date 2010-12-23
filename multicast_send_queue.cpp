@@ -13,10 +13,12 @@ using namespace std;
 #endif
 
 MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
-    unsigned *rtts) : store_position(0), data_on_flow(0),
+    unsigned *rtts, bool use_fixed_rate_multicast) :
+    store_position(0), data_on_flow(0),
     window_size(INITIAL_WINDOW_SIZE), ssthresh(UINT_MAX),
     last_packet_caused_congestion(UINT32_MAX),
-    is_queue_full(false), is_fatal_error_occurred(false)
+    is_queue_full(false), is_fatal_error_occurred(false),
+    use_fixed_rate(use_fixed_rate_multicast)
 {
   n_destinations = targets.size();
   buffer = std::deque<MessageRecord*>(max(n_destinations * DEFAULT_BUFFER_SCALE,
@@ -272,7 +274,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     data_on_flow += *retrans_message_size;
   }
 
-  if (data_on_flow > window_size) {
+  if (!use_fixed_rate && data_on_flow > window_size) {
     // Delay the packet to avoid congestion
     // FIXME: Be careful to avoid overflow in the following expression
     useconds_t delay = max_round_trip_time *

@@ -80,6 +80,8 @@ private:
     // inside the channel
   struct timeval last_data_on_flow_evaluation; // timestamp when the last
     // packet has been sent
+  bool use_fixed_rate; // Don't use any congestion control
+    // technique, instead send multicast traffic with constant rate
 
   unsigned n_destinations;
   unsigned *first_to_acknowledge; // Array of the offsets of the first
@@ -125,7 +127,8 @@ private:
   pthread_cond_t transmission_finished_cond;
 
 public:
-  MulticastSendQueue(const std::vector<Destination> targets, unsigned *rtts);
+  MulticastSendQueue(const std::vector<Destination> targets, unsigned *rtts,
+    bool use_fixed_rate_multicast);
   ~MulticastSendQueue();
 
   unsigned get_window_size() const { return window_size; }

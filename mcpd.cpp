@@ -948,6 +948,7 @@ int main(int argc, char **argv)
               unicast_receiver,
               MulticastSender::server_mode, multicast_port,
               0 /* bandwidth */,
+              false, // use_fixed_rate_multicast
               multicast_sender_number);
             ++multicast_sender_number;
             if (remaining_dst == NULL) {

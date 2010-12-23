@@ -421,6 +421,7 @@ MulticastSender *MulticastSender::create_and_initialize(
     Mode mode,
     uint16_t multicast_port,
     unsigned bandwidth,
+    bool use_fixed_rate_multicast,
     unsigned n_retransmissions)
 {
   MulticastSender *multicast_sender = NULL;
@@ -489,12 +490,13 @@ MulticastSender *MulticastSender::create_and_initialize(
       if (local_destinations.size() > 0)
 #endif
       {
-        multicast_sender = new MulticastSender(reader,
-          mode, multicast_port, n_sources, n_retransmissions, bandwidth);
+        multicast_sender = new MulticastSender(reader, mode, multicast_port,
+          n_sources, n_retransmissions, bandwidth);
         // Establish the multicast session
         const vector<Destination> *si_result;
         si_result = multicast_sender->session_init(local_addresses[i],
-          local_destinations, n_sources, use_global_multicast);
+          local_destinations, n_sources, use_global_multicast,
+          use_fixed_rate_multicast);
         if (si_result == NULL) {
           // A fatal error occurred
           delete multicast_sender;
@@ -545,7 +547,8 @@ MulticastSender *MulticastSender::create_and_initialize(
     // Establish the multicast session
     const vector<Destination> *si_result;
     si_result = multicast_sender->session_init(multicast_interface,
-      all_destinations, n_sources, use_global_multicast);
+      all_destinations, n_sources, use_global_multicast,
+      use_fixed_rate_multicast);
     if (si_result == NULL) {
       // A fatal error occurred
       delete multicast_sender;
@@ -599,14 +602,15 @@ const std::vector<Destination>* MulticastSender::session_init(
     uint32_t local_addr,
     const std::vector<Destination>& dst,
     int n_sources,
-    bool use_global_multicast)
+    bool use_global_multicast,
+    bool use_fixed_rate_multicast)
 {
   // Clear the previous connection targets
   local_address = local_addr;
   targets.clear();
   map<uint32_t, unsigned> round_trip_times;
   
-  allowed_to_send = MAX_UDP_PACKET_SIZE * 4;
+  allowed_to_send = MAX_UDP_PACKET_SIZE;
   gettimeofday(&bandwidth_estimation_timestamp, NULL);
   
   // Fill up the multicast address to be used in the connection
@@ -841,7 +845,7 @@ finish_session_initialization:
   for (unsigned i = 0; i < targets.size(); ++i) {
     rtts[i] = round_trip_times[targets[i].addr];
   }
-  send_queue = new MulticastSendQueue(targets, rtts);
+  send_queue = new MulticastSendQueue(targets, rtts, use_fixed_rate_multicast);
 
   return &targets;
 }

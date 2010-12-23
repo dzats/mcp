@@ -67,6 +67,10 @@ void usage_and_exit(char *name)
   "\t-b value\n"
   "\t\tSet per-sender bandwidth limit (suffix 'm' - megabits/second,\n"
   "\t\tsuffix 'M' - megabytes/second, without suffix - bytes/second).\n\n"
+  "\t-f rate\n"
+  "\t\tSet fixed-rate mode for the multicast transfert.  Rate is\n"
+  "\t\tspecified in bytes/second (suffix 'm' - megabits/second,\n"
+  "\t\tsuffix 'M' - megabytes/second).\n\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
   "\t\ttransfert.\n");
   exit(EXIT_FAILURE);
@@ -233,6 +237,8 @@ int main(int argc, char **argv)
   bool use_global_multicast = false; // Don't limit multicast by the local link
   uint32_t multicast_interface = INADDR_NONE; // Interface that will be used
     // for global multicast traffic
+  bool use_fixed_rate_multicast = false; // Don't use any congestion control
+    // technique, instead send multicast traffic with constant rate
 
 #ifdef NDEBUG
   openlog(argv[0], LOG_PERROR | LOG_PID, LOG_DAEMON);
@@ -245,7 +251,7 @@ int main(int argc, char **argv)
 
   // Parse the command options
   int ch;
-  while ((ch = getopt(argc, argv, "p:P:omg:Uub:ch")) != -1) {
+  while ((ch = getopt(argc, argv, "p:P:omg:Uub:f:ch")) != -1) {
     switch (ch) {
       case 'p': // Port specified
         if ((unicast_port = atoi(optarg)) == 0) {
@@ -309,6 +315,7 @@ int main(int argc, char **argv)
         is_first_hop_unicast_only = true;
         break;
       case 'b': // Set per-sender bandwidth
+      case 'f': // Set fixed rate for multicast traffic
         for (unsigned i = 0; i < strlen(optarg) - 1; ++i) {
           if (optarg[i] < '0' || optarg[i] > '9') {
             ERROR("Incorrect bandwidth: %s\n", optarg);
@@ -338,6 +345,7 @@ int main(int argc, char **argv)
           ERROR("Incorrect bandwidth: %s\n", optarg);
           return EXIT_FAILURE;
         }
+        if (ch == 'f') { use_fixed_rate_multicast = true; }
         DEBUG("Bandwidth (in bytes per 1.048576 seconds): %u\n", bandwidth);
         break;
       case 'c': // Verify the file checksums twise
@@ -501,7 +509,7 @@ int main(int argc, char **argv)
         &remaining_dst, n_sources,
         is_multicast_only, use_global_multicast, multicast_interface,
         source_reader, MulticastSender::client_mode,
-        multicast_port, bandwidth, n_retransmissions);
+        multicast_port, bandwidth, use_fixed_rate_multicast, n_retransmissions);
       if (remaining_dst == NULL) {
         // Some error occurred during the multicast sender initialization
         SDEBUG("Initialization of the multicast sender failed.\n");

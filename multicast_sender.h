@@ -68,6 +68,8 @@ private:
     // multicast connection
   struct sockaddr_in target_address; // address used for multicast connection
   unsigned bandwidth; // Bandwidth limit for this particular sender
+  bool use_fixed_rate_multicast; // Don't use any congestion control
+    // technique, instead send multicast traffic with constant rate
 
   int64_t allowed_to_send; // auxilary variable used to
     // implement the bandwidth limitation
@@ -137,6 +139,7 @@ public:
     Mode mode,
     uint16_t multicast_port,
     unsigned bandwidth,
+    bool use_fixed_rate_multicast,
     unsigned n_retransmissions);
 
   /*
@@ -148,7 +151,8 @@ public:
     uint32_t local_addr,
     const std::vector<Destination>& dst,
     int n_sources,
-    bool use_global_multicast);
+    bool use_global_multicast,
+    bool use_fixed_rate_multicast);
 
   /*
     This is the main routine of the multicast sender. It sends
