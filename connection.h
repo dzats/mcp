@@ -34,7 +34,7 @@
 #define UNICAST_PORT 6879 // default TCP port used for the unicast connections
 #define MULTICAST_PORT 6879 // default UDP port used for the multicast
   // connections
-#define MAX_ERROR_LENGTH 256 // max length of the error messages
+#define MAX_ERROR_LENGTH 1200 // max length of the error messages
 #define DEFAULT_MULTICAST_ADDR "224.0.0.78"
 #define UDP_MAX_LENGTH 65536 // Max length for a UDP datagram
 #define MAX_UDP_PACKET_SIZE 1472 // Max length for an unfragmented UDP datagram
@@ -48,7 +48,9 @@
 // Fatal errors (numbers are greater or equal to STATUS_FIRST_FATAL_ERROR)
 #define STATUS_FIRST_FATAL_ERROR 128 // fatal error with the minimum number
 #define STATUS_UNICAST_INIT_ERROR STATUS_FIRST_FATAL_ERROR
+#define STATUS_MULTICAST_INIT_ERROR 129
 #define STATUS_UNICAST_CONNECTION_ERROR 130
+#define STATUS_MULTICAST_CONNECTION_ERROR 131
 #define STATUS_TOO_MANY_RETRANSMISSIONS 132
 #define STATUS_FATAL_DISK_ERROR 133
 #define STATUS_UNKNOWN_ERROR 134
@@ -65,6 +67,7 @@
 #define MULTICAST_FILE_RETRANS_REQUEST 0x1a4f7c30
 #define MULTICAST_ERROR_MESSAGE 0x4c713fa0
 #define MULTICAST_TERMINATION_REQUEST 0xe679c240
+#define MULTICAST_ABNORMAL_TERMINATION_REQUEST 0xe679c24F
 
 #define MULTICAST_FINAL_TIMEOUT 4000 // (in milliseconds) Since only the
   // link-local traffic is used, this value seemed to be enough. This
@@ -77,8 +80,8 @@
 
 // Flags which determine the global behaviour
 #define PRESERVE_ORDER_FLAG 1
-#define  UNICAST_ONLY_FLAG 2
-#define  VERIFY_CHECKSUMS_TWISE_FLAG 4
+#define UNICAST_ONLY_FLAG 2
+#define VERIFY_CHECKSUMS_TWISE_FLAG 4
 
 /*
   Data structures

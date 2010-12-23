@@ -20,8 +20,6 @@
 #include <algorithm>
 #include <sys/param.h> // for MAXPATHLEN
 
-// FIXME: be carefull with the use of volatiles
-
 using namespace std;
 
 #include "md5.h"
@@ -52,7 +50,7 @@ void usage_and_exit(char *name)
   "\t-u\tUnicast only (for the first hop)\n"
   "\t-m\tMulticast only\n"
   "\t-c\tVerify the file checksums twise. The second verification is\n"
-  "\t\tperformed on data read from the disk.\n"
+  "\t\tperformed on data written to the disk.\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
   "\t\ttransfert.\n\n");
   exit(EXIT_FAILURE);
@@ -79,6 +77,7 @@ void *multicast_sender_routine(void *args)
   MulticastSender *ms = (MulticastSender *)args;
   if (ms->session() != 0) {
     // Signal about an error
+    SDEBUG("Multicast sender finished with an error\n");
     return (void *)-1;
   }
   return NULL;
@@ -205,11 +204,11 @@ int main(int argc, char **argv)
   uint16_t multicast_port = MULTICAST_PORT; // UDP port used
     // for multicast connections
   uint32_t flags = 0;
-#ifdef NDEBUG // Multicast is temporary switched off
-  bool is_unicast_only = true; // Use only the unicast traffic
-  flags |= UNICAST_ONLY_FLAG;
+#ifdef USE_MULTICAST // Multicast is temporary switched off
+  bool is_unicast_only = false; // If it's true, use only the unicast traffic
 #else
-  bool is_unicast_only = false; // Use only the unicast traffic
+  bool is_unicast_only = true; // If it's true, use only the unicast traffic
+  flags |= UNICAST_ONLY_FLAG;
 #endif
 
   // Set speed for the pseudo-random numbers
@@ -454,9 +453,9 @@ int main(int argc, char **argv)
       is_unicast_sender_started = true;
     }
   
-    bool is_fatal_error_occurred = false;
+    bool is_unrecoverable_error_occurred = false;
     if (source_reader->read_sources(filenames, filename_offsets) != 0) {
-      is_fatal_error_occurred = true;
+      is_unrecoverable_error_occurred = true;
     }
   
     // Wait for the reader and multicast_sender
@@ -464,13 +463,13 @@ int main(int argc, char **argv)
     if (is_unicast_sender_started) {
       pthread_join(unicast_sender_thread, &result);
       if (result != NULL) {
-        is_fatal_error_occurred = true;
+        is_unrecoverable_error_occurred = true;
       }
     }
     if (is_multicast_sender_started) {
       pthread_join(multicast_sender_thread, &result);
       if (result != NULL) {
-        is_fatal_error_occurred = true;
+        is_unrecoverable_error_occurred = true;
       }
     }
 
@@ -478,7 +477,8 @@ int main(int argc, char **argv)
     if (source_reader->is_unrecoverable_error_occurred()) {
       is_unrecoverable_error_occurred = true;
     }
-    if (is_fatal_error_occurred) {
+    if (is_unrecoverable_error_occurred) {
+      SDEBUG("Unrecoverable error occurred\n");
       return EXIT_FAILURE;
     }
 

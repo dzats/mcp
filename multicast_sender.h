@@ -20,7 +20,6 @@ class MulticastSender : public Writer
 public:
   enum Mode {server_mode, client_mode};
 private:
-
   struct ErrorMessage
   {
     uint32_t number;
@@ -44,14 +43,16 @@ private:
   };
 
   static const unsigned MAX_INITIALIZATION_RETRIES = 9;
+  static const unsigned MAX_ABNORMAL_TERMINATION_RETRIES = 3;
   static const unsigned INIT_RETRANSMISSION_RATE = 200000; // rate for the
     // session initialization message (in microseconds)
   static const unsigned DEFAULT_TERMINATE_RETRANSMISSION_RATE = 200000000;
     // retransmission rate of the termination request message
     // (in nanoseconds)
+  static const unsigned DEFAULT_ROUND_TRIP_TIME = 40000; // (in milliseconds)
   static const unsigned MAX_ERROR_QUEUE_SIZE_MULTIPLICATOR = 4; // Max size
     // of the error queue / number of targets
-  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 16; // Max number
+  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 32; // Max number
     // of the multicast session termination retry messages to be send
   static const unsigned MAX_PORT_CHOOSING_TRIES = 10;
 
@@ -129,19 +130,24 @@ public:
 private:
   // A helper function that chooses a UDP port and binds socket to it
   uint16_t choose_ephemeral_port();
-  // A helper fuction which reliably sends message to the multicast connection
+
+  // Helper fuction that sends 'message' to the udp socket.
+  void udp_send(const void *message, int size, int flags);
+
+  // Helper fuction which reliably sends message to the multicast connection.
   void mcast_send(const void *message, int size);
+
   // A helper function which sends file to the multicast destinations
   void send_file();
+
+  // Abnormal multicast connection termination
+  void abnormal_termination();
 
   // Routine that controls the multicast packets delivery,
   // should be started in a separate thread
   void multicast_delivery_control();
   // A wrapper function for multicast_delivery_control
-  static void* multicast_delivery_thread(void *arg);
-
-  // helper fuction that sends 'message' to the udp socket
-  void udp_send(const void *message, int size, int flags);
+  static void* multicast_delivery_control_wrapper(void *arg);
 
   // Register an error and finish the current task
   void register_error(uint8_t status, const char *fmt, const char *error);

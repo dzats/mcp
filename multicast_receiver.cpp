@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
@@ -33,7 +34,20 @@
 
 using namespace std;
 
-// Get next value for the file retransmission timeout
+// Register an error to be delivered to the source
+void MulticastReceiver::register_error(uint8_t status, const char *fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  char *error_message = (char *)malloc(MAX_ERROR_LENGTH);
+  vsnprintf(error_message, MAX_ERROR_LENGTH, fmt, args);
+
+  error_queue.add_text_error(status, error_message, session_id, local_address);
+  free(error_message);
+  va_end(args);
+}
+
+// Get next value for the file retransmission timeout.
 unsigned MulticastReceiver::get_error_retrans_timeout(unsigned prev_timeout)
 {
   // FIXME: figure out a better way
@@ -47,8 +61,9 @@ unsigned MulticastReceiver::get_error_retrans_timeout(unsigned prev_timeout)
   return timeout;
 }
 
-// Sends a UDP datagram to the multicast sender
-void MulticastReceiver::send_datagram(void *data, size_t length)
+// Sends a UDP datagram to the multicast sender.
+// Returns zero on success and error code otherwise.
+int MulticastReceiver::send_datagram(void *data, size_t length)
 {
   MulticastMessageHeader *mmh = (MulticastMessageHeader *)data;
   mmh->set_responder(local_address);
@@ -58,92 +73,17 @@ void MulticastReceiver::send_datagram(void *data, size_t length)
       (struct sockaddr *)&source_addr, sizeof(source_addr));
   } while (sendto_result < 0 && errno == ENOBUFS);
   if (sendto_result < 0) {
-    ERROR("Can't send a reply: %s\n", strerror(errno));
-    // FIXME: do something else here
-    abort();
+    DEBUG("Can't send a udp datagram: %s\n", strerror(errno));
+    return errno;
+  } else {
+    return 0;
   }
 }
 
-// Send a reply back to the source
-void MulticastReceiver::send_reply(uint32_t number)
-{
-  DEBUG("Send a reply for the packet %u\n", number);
-  MulticastMessageHeader mmh(MULTICAST_RECEPTION_CONFORMATION, session_id);
-  mmh.set_number(number);
-  send_datagram(&mmh, sizeof(mmh));
-}
-
-// This method implements something like the TCP's TIME_WAIT state. It waits
-// for possible retransmissions of the MULTICAST_TERMINATION_REQUEST message.
-void MulticastReceiver::time_wait(uint8_t * const buffer)
-{
-  struct pollfd pfd;
-  pfd.fd = sock;
-  pfd.events = POLLIN;
-  int poll_result;
-
-  struct sockaddr_in client_addr;
-  socklen_t client_addr_len = sizeof(client_addr);
-
-  int timeout = MULTICAST_FINAL_TIMEOUT;
-  struct timeval initial_time;
-  gettimeofday(&initial_time, NULL);
-  while (1) {
-    DEBUG("Wait for a session termination message %u milliseconds\n",
-      timeout);
-    poll_result = poll(&pfd, 1, timeout);
-    if (poll_result == 0) {
-      // Timeout expired, transmission done
-      pthread_exit(NULL);
-    } else if (poll_result > 0) {
-      // Skip everything except the MULTICAST_TERMINATION_REQUEST message
-      int len = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
-        (struct sockaddr *)&client_addr, &client_addr_len);
-      if (len >= (int)sizeof(MulticastMessageHeader)) {
-        MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
-        // Check the session id and the source address
-        if (client_addr.sin_addr.s_addr == source_addr.sin_addr.s_addr &&
-            mmh->get_session_id() == session_id &&
-            mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
-          // Search whether the local address contained in this message
-          uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
-          uint32_t *hosts_end = (uint32_t *)(buffer + len); 
-          uint32_t *i = find(hosts_begin, hosts_end,
-            htonl(local_address));
-          if (i != hosts_end) {
-            // Reply to the message and reset the timeout
-            DEBUG("Reply for the session termination message (%u)\n",
-              mmh->get_number());
-            send_reply(mmh->get_number());
-            gettimeofday(&initial_time, NULL);
-          }
-        }
-      } else if (len < 0) {
-        perror("recv_from error");
-        exit(EXIT_FAILURE);
-      } else {
-        DEBUG("Incorrect message of length %d received\n", len);
-        // Simply ignore the message
-        continue;
-      }
-    } else {
-      perror("poll error");
-    }
-    // Recalculate the timeout value
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    timeout = MULTICAST_FINAL_TIMEOUT -
-      (now.tv_sec - initial_time.tv_sec) * 1000 -
-      (now.tv_usec - initial_time.tv_usec) / 1000;
-    if (timeout < 0) {
-      timeout = 0;
-    }
-  }
-}
-
-// Sends error message with information about packets that have not been
-// received.
-void MulticastReceiver::send_missed_packets(uint32_t message_number) {
+// Sends error message with information about packets
+// that have not been received.
+// Returns zero on success and error code otherwise.
+int MulticastReceiver::send_missed_packets(uint32_t message_number) {
   set<uint32_t>::iterator i = missed_packets.begin();
 
   uint8_t message[MAX_UDP_PACKET_SIZE];
@@ -178,12 +118,110 @@ void MulticastReceiver::send_missed_packets(uint32_t message_number) {
   DEBUG("Retransmission request for %u-%u\n",
     ntohl(*(store_positon - 2)), ntohl(*(store_positon - 1)));
   
-  SDEBUG("Send retransmission requests\n");
-  send_datagram(message, (uint8_t *)store_positon - message);
+  return send_datagram(message, (uint8_t *)store_positon - message);
+}
+
+// Send a reply back to the source
+// Returns zero on success and error code otherwise
+int MulticastReceiver::send_reply(uint32_t number)
+{
+  DEBUG("Send a reply for the packet %u\n", number);
+  MulticastMessageHeader mmh(MULTICAST_RECEPTION_CONFORMATION, session_id);
+  mmh.set_number(number);
+  return send_datagram(&mmh, sizeof(mmh));
+}
+
+// This method implements something like the TCP's TIME_WAIT state. It waits
+// for possible retransmissions of the MULTICAST_TERMINATION_REQUEST message.
+void MulticastReceiver::time_wait(uint8_t * const buffer)
+{
+  struct pollfd pfd;
+  pfd.fd = sock;
+  pfd.events = POLLIN;
+  int poll_result;
+
+  struct sockaddr_in client_addr;
+  socklen_t client_addr_len = sizeof(client_addr);
+
+  int timeout = MULTICAST_FINAL_TIMEOUT;
+  struct timeval initial_time;
+  gettimeofday(&initial_time, NULL);
+  SDEBUG("Enter to the TIME_WAIT state\n");
+  while (1) {
+    DEBUG("wait for %u milliseconds\n", timeout);
+    poll_result = poll(&pfd, 1, timeout);
+    if (poll_result == 0) {
+      // Timeout expired, transmission done
+      pthread_exit(this);
+    } else if (poll_result > 0) {
+      // Skip everything except the MULTICAST_TERMINATION_REQUEST message
+      int len = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
+        (struct sockaddr *)&client_addr, &client_addr_len);
+      if (len >= (int)sizeof(MulticastMessageHeader)) {
+        MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
+        // Check the session id and the source address
+        if (client_addr.sin_addr.s_addr == source_addr.sin_addr.s_addr &&
+            mmh->get_session_id() == session_id &&
+            (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST ||
+            mmh->get_message_type() == MULTICAST_ABNORMAL_TERMINATION_REQUEST)
+            ) {
+          // Search whether the local address contained in this message
+          uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
+          uint32_t *hosts_end = (uint32_t *)(buffer + len); 
+          uint32_t *i = find(hosts_begin, hosts_end,
+            htonl(local_address));
+          if (i != hosts_end) {
+            // Reply to the message and reset the timeout
+            DEBUG("Reply for the session termination message (%u)\n",
+              mmh->get_number());
+            int send_reply_result = send_reply(mmh->get_number());
+            if (send_reply_result != 0) {
+              ERROR("Can't send a reply to session termination message: %s",
+                strerror(send_reply_result));
+              pthread_exit(NULL);
+            }
+            gettimeofday(&initial_time, NULL);
+          }
+        }
+      } else if (len < 0) {
+        ERROR("recvfrom error: %s", strerror(errno));
+        pthread_exit(NULL);
+      } else {
+        DEBUG("Incorrect message of length %d received\n", len);
+        // Simply ignore the message
+        continue;
+      }
+    } else {
+      ERROR("poll error: %s", strerror(errno));
+      pthread_exit(NULL);
+    }
+    // Recalculate the timeout value
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    timeout = MULTICAST_FINAL_TIMEOUT -
+      (now.tv_sec - initial_time.tv_sec) * 1000 -
+      (now.tv_usec - initial_time.tv_usec) / 1000;
+    if (timeout < 0) {
+      timeout = 0;
+    }
+  }
+}
+
+// Finish the multicast receiver process if there were no messages from
+// the multicast sender during MAX_IDLE_TIME
+void MulticastReceiver::exit_on_timeout_from_read_messages() {
+  // TODO: It can worth to implement someting like keepalive feature,
+  // instead of simply close the connection.
+  char addr[INET_ADDRSTRLEN];
+  ERROR("Multicast connection with host the %s timed out\n",
+    inet_ntop(AF_INET, &source_addr.sin_addr.s_addr, addr,
+    sizeof(addr)));
+  message_queue.set_fatal_error();
+  pthread_exit(NULL);
 }
 
 // This routine reads data from the connection and put it into message_queue
-void MulticastReceiver::read_data()
+void MulticastReceiver::read_messages()
 {
   // Wait for incoming connections
   uint8_t * const buffer = (uint8_t *)malloc(UDP_MAX_LENGTH); // maximum UDP
@@ -202,7 +240,8 @@ void MulticastReceiver::read_data()
     uint32_t i_addr = ntohl(interface_address);
     ERROR("Can't join the multicast group " DEFAULT_MULTICAST_ADDR " on %s: %s",
       inet_ntop(AF_INET, &i_addr, addr, sizeof(addr)), strerror(errno));
-    exit(EXIT_FAILURE);
+    message_queue.set_fatal_error();
+    pthread_exit(NULL);
   }
 
   struct pollfd pfd;
@@ -216,7 +255,7 @@ void MulticastReceiver::read_data()
 
   struct sockaddr_in client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
-  SDEBUG("read_data started\n");
+  SDEBUG("read_messages started\n");
   while (1) {
     if (is_termination_request_received && missed_packets.size() == 0) {
       message_queue.wait_termination_synchronization();
@@ -224,7 +263,13 @@ void MulticastReceiver::read_data()
         // All work is done.
         DEBUG("Reply for the session termination message (%u)\n",
           termination_request_number);
-        send_reply(termination_request_number);
+        int send_reply_result = send_reply(termination_request_number);
+        if (send_reply_result != 0) {
+          ERROR("Can't send a UDP reply: %s\n",
+            strerror(send_reply_result));
+          message_queue.set_fatal_error();
+          pthread_exit(NULL);
+        }
         // move to something like the TCP's TIME_WAIT state.
         time_wait(buffer);
       }
@@ -261,51 +306,47 @@ void MulticastReceiver::read_data()
           // Send a file/message retransmission request
           total_time_slept += time_to_sleep;
           if (total_time_slept >= (int)MAX_IDLE_TIME) {
-            char addr[INET_ADDRSTRLEN];
-            ERROR("Multicast connection with host the %s timed out\n",
-              inet_ntop(AF_INET, &source_addr.sin_addr.s_addr, addr,
-              sizeof(addr)));
-            exit(EXIT_FAILURE);
+            exit_on_timeout_from_read_messages();
           }
           list<MulticastErrorQueue::ErrorMessage*>::iterator it =
             error_queue.get_error();
           MulticastErrorQueue::ErrorMessage *em = *it;
-          DEBUG("Send a file retransmission request %u\n",
+          DEBUG("Send an error %u\n",
             ((MulticastMessageHeader *)em->message)->get_number());
-          if (sendto(sock, em->message, em->message_size, 0,
-            (struct sockaddr *)&source_addr, sizeof(source_addr)) < 0) {
-            ERROR("Can't send a file retransmission request: %s\n",
-              strerror(errno));
-            abort();
+          int send_result = send_datagram(em->message, em->message_size);
+          if (send_result != 0) {
+            ERROR("Can't send an error back to the multicast source: %s\n",
+              strerror(send_result));
+            message_queue.set_fatal_error();
+            pthread_exit(NULL);
           }
           gettimeofday(&em->timestamp, NULL);
           em->retrans_timeout = get_error_retrans_timeout(em->retrans_timeout);
           DEBUG("New timeout: %u\n", em->retrans_timeout);
           error_queue.move_back(it);
         } else if (poll_result > 0) {
-          // There are some input available, this is the only exit from
-          // the infinite loop
+          // There are some input available. It is the only normal
+          // exit from this infinite loop.
           break;
         } else {
-          ERROR("poll call returned: %s", strerror(errno));
-          abort();
+          ERROR("poll error: %s", strerror(errno));
+          message_queue.set_fatal_error();
+          pthread_exit(NULL);
         }
 
         assert(error_queue.get_n_errors() > 0);
       }
     } else {
-      // Poll here is to kill idle connections
+      // Poll here is to terminate idle connections
       int poll_result;
       poll_result = poll(&pfd, 1, MAX_IDLE_TIME);
       if (poll_result <= 0) {
         if (poll_result < 0) {
-          perror("poll error");
+          ERROR("poll error: %s", strerror(errno));
+          message_queue.set_fatal_error();
+          pthread_exit(NULL);
         } else {
-          char addr[INET_ADDRSTRLEN];
-          ERROR("Multicast connection with the host %s timed out\n",
-            inet_ntop(AF_INET, &source_addr.sin_addr.s_addr, addr,
-            sizeof(addr)));
-          exit(EXIT_FAILURE);
+          exit_on_timeout_from_read_messages();
         }
       }
     }
@@ -313,8 +354,10 @@ void MulticastReceiver::read_data()
     int len = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
       (struct sockaddr *)&client_addr, &client_addr_len);
     
-    if (len >= (int)sizeof(MulticastMessageHeader)) {
+    if (len >= (int)sizeof(MulticastMessageHeader) &&
+        len <= MAX_UDP_PACKET_SIZE) {
       MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
+      uint32_t message_number = mmh->get_number();
 #ifndef NDEBUG
       {
         char sender_a[INET_ADDRSTRLEN];
@@ -344,39 +387,48 @@ void MulticastReceiver::read_data()
 
       if (mmh->get_message_type() == MULTICAST_RECEPTION_CONFORMATION) {
         // Remove the corresponding pendinig error
-        DEBUG("Conformation for the message: %d\n", mmh->get_number());
+        DEBUG("Conformation for the error message: %d\n", mmh->get_number());
         error_queue.remove(mmh->get_number());
+#if 0
+        if (error_queue.remove(mmh->get_number()) >= STATUS_FIRST_FATAL_ERROR) {
+          // Reply to a fatal error received, finish the multicast sender
+          SDEBUG("Finish the multicast sender\n");
+          pthread_exit(NULL);
+        }
+#endif
         continue;
       }
 
       // Store the message to be processed (may be later)
-      message_queue.put_message(buffer, len, mmh->get_number());
+      if (message_queue.put_message(buffer, len, message_number) != 0) {
+        DEBUG("Discard the message %d (queue is full)\n", message_number);
+        continue;
+      }
 
-      uint32_t message_num = mmh->get_number();
-      if (next_message_expected != message_num) {
-        DEBUG("Unexpected packet: %d, expected %d\n", message_num,
+      if (next_message_expected != message_number) {
+        DEBUG("Unexpected packet: %d, expected %d\n", message_number,
           next_message_expected);
-        if (cyclic_less(message_num, next_message_expected)) {
+        if (cyclic_less(message_number, next_message_expected)) {
           // A retransmission received
-          set<uint32_t>::iterator i = missed_packets.find(message_num);
+          set<uint32_t>::iterator i = missed_packets.find(message_number);
           if (i != missed_packets.end()) {
             missed_packets.erase(i);
           }
-          DEBUG("Retransmission for %u(%zu) received\n", message_num,
+          DEBUG("Retransmission for %u(%zu) received\n", message_number,
             missed_packets.size());
           // We can send a new error message
           if (is_missed_sent &&
-              cyclic_less_or_equal(message_num, previous_retrans)) {
+              cyclic_less_or_equal(message_number, previous_retrans)) {
             is_missed_sent = false;
           } else {
-            previous_retrans = message_num;
+            previous_retrans = message_number;
           }
         } else {
           // Some packets lost
           // TODO: some additional packets have been missed.
           // For fast recovery we can send information about new 
           // missed packets in the next reply.
-          for (; next_message_expected != message_num;
+          for (; next_message_expected != message_number;
             ++next_message_expected) {
             DEBUG("Packet %u (%zu) lost\n", next_message_expected,
               missed_packets.size());
@@ -388,86 +440,143 @@ void MulticastReceiver::read_data()
         next_message_expected++;
       }
 
-      if (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
-        // Search whether the local address contained in this message
-        uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
-        uint32_t *hosts_end = (uint32_t *)(buffer + len); 
-        uint32_t *i = find(hosts_begin, hosts_end,
-          htonl(local_address));
-        if (i != hosts_end) {
-          // The host is supposed to reply to this message
-          if (!is_termination_request_received) {
-            SDEBUG("Termination request received\n");
-            is_termination_request_received = true;
-            termination_request_number = mmh->get_number();
-          }
-          if (missed_packets.size() > 0 &&
-              cyclic_less(*missed_packets.begin(), message_num)) {
-            // FIXME: ACK flooding is possible here
-            send_missed_packets(message_num);
-          }
-        }
-      } else {
-        SDEBUG("Normal packet\n");
-        // FIXME: check the message type here
-        // Reply to the message if required
-        if (mmh->get_responder() == local_address) {
-          if (missed_packets.size() == 0 ||
-              cyclic_greater(*missed_packets.begin(), message_num)) {
-            // No packets've been lost, send the reply
-            send_reply(message_num);
-          } else {
-            // Some packets are lost, send information about this
-            // if it has not been send in reply to some previous
-            // packet.
-            if (!is_missed_sent) {
-              send_missed_packets(message_num);
-              is_missed_sent = true;
-              previous_retrans = message_num;
+      switch (mmh->get_message_type()) {
+        case MULTICAST_TERMINATION_REQUEST:
+        case MULTICAST_ABNORMAL_TERMINATION_REQUEST: {
+            // Search whether the local address contained in this message
+            uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
+            uint32_t *hosts_end = (uint32_t *)(buffer + len); 
+            uint32_t *i = find(hosts_begin, hosts_end,
+              htonl(local_address));
+            if (i != hosts_end) {
+              // The host is supposed to reply to this message
+              if (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
+                if (!is_termination_request_received) {
+                  SDEBUG("Termination request received\n");
+                  is_termination_request_received = true;
+                  termination_request_number = mmh->get_number();
+                }
+                if (missed_packets.size() > 0 &&
+                    cyclic_less(*missed_packets.begin(), message_number)) {
+                  // FIXME: ACK flooding is possible here
+                  int result = send_missed_packets(message_number);
+                  if (result != 0) {
+                    ERROR("Can't send information about missed packets: %s\n",
+                      strerror(result));
+                    message_queue.set_fatal_error();
+                    pthread_exit(NULL);
+                  }
+                }
+              } else {
+                SDEBUG("Multicast abnormal termination request received\n");
+                message_queue.set_fatal_error();
+                int send_reply_result = send_reply(message_number);
+                if (send_reply_result != 0) {
+                  ERROR("Can't send a UDP reply: %s\n",
+                    strerror(send_reply_result));
+                  pthread_exit(NULL);
+                }
+                time_wait(buffer);
+              }
             }
           }
-        }
+          break;
+        default:
+          SDEBUG("Normal packet\n");
+          // FIXME: check the message type here
+          // Reply to the message if required
+          if (mmh->get_responder() == local_address) {
+            SDEBUG("Packet destinated to this host\n");
+            if (missed_packets.size() == 0 ||
+                cyclic_greater(*missed_packets.begin(), message_number)) {
+              // No packets've been lost, send the reply
+              int send_reply_result = send_reply(message_number);
+              if (send_reply_result != 0) {
+                ERROR("Can't send a UDP reply: %s\n",
+                  strerror(send_reply_result));
+                message_queue.set_fatal_error();
+                pthread_exit(NULL);
+              }
+            } else {
+              // Some packets are lost, send information about this
+              // if it has not been send in reply to some previous
+              // packet.
+              if (!is_missed_sent) {
+                int result = send_missed_packets(message_number);
+                if (result != 0) {
+                  ERROR("Can't send information about missed packets: %s\n",
+                    strerror(result));
+                  message_queue.set_fatal_error();
+                  pthread_exit(NULL);
+                }
+                is_missed_sent = true;
+                previous_retrans = message_number;
+#if 0
+              } else {
+                SDEBUG("Send empty retransmission request to correct RTT "
+                  "calculation\n");
+                // Send information that some packets have been missed,
+                // but don't send numbers of than packets to avoid ACK
+                // flooding. FIXME: It is not the best choise.
+                uint8_t message[sizeof(MulticastMessageHeader)];
+                MulticastMessageHeader *mmh = new(message)
+                  MulticastMessageHeader(MULTICAST_MESSAGE_RETRANS_REQUEST,
+                  session_id);
+                mmh->set_number(message_number);
+                mmh->set_responder(local_address);
+                int send_datagram_result = send_datagram(message,
+                  sizeof(message));
+                if (send_datagram_result != 0) {
+                  ERROR("Can't send a UDP reply: %s\n",
+                    strerror(send_datagram_result));
+                  message_queue.set_fatal_error();
+                  pthread_exit(NULL);
+                }
+#endif
+              }
+            }
+          }
       }
     } else if (len < 0) {
-      perror("recv_from error");
-      exit(EXIT_FAILURE);
+      ERROR("recvfrom error: %s", strerror(errno));
+      message_queue.set_fatal_error();
+      pthread_exit(NULL);
     } else {
-      DEBUG("Incorrect message of length %d received\n", len);
-      // Simply ignore the message
+      DEBUG("Message of incorrect length %d received\n", len);
+      // Silently ignore the message
       continue;
     }
   }
 }
 
-// Wrapper function to run the read_data method in a separate thread
-void* MulticastReceiver::read_data_wrapper(void *arg)
+// Wrapper function to run the read_messages method in a separate thread
+void* MulticastReceiver::read_messages_wrapper(void *arg)
 {
   MulticastReceiver *mr = (MulticastReceiver *)arg;
-  mr->read_data(); 
+  mr->read_messages(); 
 
-  SDEBUG("read_data_wrapper exited\n");
+  SERROR("read_messages method exited unexpectedly\n");
   return NULL;
 }
 
 // The routine reads data from the connection and pass it to the 
-// process_data routine
-void MulticastReceiver::session()
+// process_data routine. Returns EXIT_SUCCESS or EXIT_FAILURE.
+int MulticastReceiver::session()
 {
-  // Start the read_data routine in a separate thread
+  // Start the read_messages routine in a separate thread
   int error;
-  pthread_t read_data_thread;
-  error = pthread_create(&read_data_thread, NULL, read_data_wrapper, this);
+  pthread_t read_messages_thread;
+  error = pthread_create(&read_messages_thread, NULL, read_messages_wrapper, this);
   if (error != 0) {
-    ERROR("Can't create a new thread: %s\n", strerror(errno));
-    // TODO: Set the error here
-    exit(EXIT_FAILURE);
+    ERROR("Can't create a new thread: %s\n", strerror(error));
+    return EXIT_FAILURE;
   }
 
   // Read and process the data
-  while (1) {
-    size_t length;
-    MulticastMessageHeader *mmh =
-      (MulticastMessageHeader *)message_queue.get_message(&length);
+  size_t length;
+  MulticastMessageHeader *mmh =
+    (MulticastMessageHeader *)message_queue.get_message(&length);
+  do {
     // Do something with the message
     switch (mmh->get_message_type()) {
       case MULTICAST_TARGET_PATHS: {
@@ -495,10 +604,12 @@ void MulticastReceiver::session()
               char *error;
               path_type = get_path_type(path, &error, n_sources);
               if (path_type == path_is_invalid) {
-                //register_error(STATUS_FATAL_DISK_ERROR, error);
+                register_error(STATUS_FATAL_DISK_ERROR, error);
                 DEBUG("%s\n", error);
-                abort(); // Report about an error somehow
                 free(error);
+                message_queue.set_fatal_error();
+                pthread_join(read_messages_thread, NULL);
+                return EXIT_FAILURE;
               }
               break;
             }
@@ -511,8 +622,15 @@ void MulticastReceiver::session()
           DEBUG("MULTICAST_FILE_RECORD(%d) message received\n",
             mmh->get_number());
           if (path == NULL) {
-            SERROR("MULTICAST_TARGET_PATHS message has not beet received.\n");
-            abort();
+            // This error is fatal
+            SERROR("MULTICAST_TARGET_PATHS message has for the particular "
+              "host has not been received.\n");
+            error_queue.add_text_error(STATUS_MULTICAST_CONNECTION_ERROR,
+              "MULTICAST_TARGET_PATHS message has for the particular host "
+              "has not been received.\n", session_id, local_address);
+            message_queue.set_fatal_error();
+            pthread_join(read_messages_thread, NULL);
+            return EXIT_FAILURE;
           }
           FileInfoHeader *fih = (FileInfoHeader *)(mmh + 1);
           file_info_header = *fih;
@@ -550,12 +668,11 @@ void MulticastReceiver::session()
             }
             if (fd == -1) {
               // Report about the error
-              DEBUG("Can't open the output file %s(%o): %s\n", target_name,
-                fih->get_mode(), strerror(error));
-              //register_input_output_error("Can't open the output file %s: %s",
-                //filename + fih->get_name_offset(), strerror(error));
+              DEBUG("Can't open the file %s: %s\n", target_name,
+                strerror(error));
+              register_error(STATUS_NOT_FATAL_DISK_ERROR,
+                "Can't open the file %s: %s", target_name, strerror(error));
               free_targetfile_name(target_name, path_type);
-              assert(0);
             }
             free_targetfile_name(target_name, path_type);
           } else {
@@ -565,18 +682,27 @@ void MulticastReceiver::session()
             const char *dirname = get_targetdir_name(
               filename + fih->get_name_offset(), path, &path_type);
             if (dirname == NULL) {
-              //register_input_output_error("The destination path %s is a file, "
-                //"but source is a directory. Remove %s first", path, path);
+              DEBUG("The destination path %s is a file, but source is a "
+                "directory", path);
+              register_error(STATUS_FATAL_DISK_ERROR,
+                "The destination path %s is a file, but source is a directory",
+                path);
               free_targetfile_name(dirname, path_type);
-              assert(0);
+              message_queue.set_fatal_error();
+              pthread_join(read_messages_thread, NULL);
+              return EXIT_FAILURE;
             }
       
             // Create the directory
             if (mkdir(dirname, fih->get_mode()) != 0 && errno != EEXIST) {
-              //register_input_output_error("Can't create directory: %s: %s",
-              //  dirname, strerror(errno));
+              DEBUG("Can't create directory: %s: %s", dirname,
+                strerror(errno));
+              register_error(STATUS_FATAL_DISK_ERROR,
+                "Can't create directory: %s: %s", dirname, strerror(errno));
               free_targetfile_name(dirname, path_type);
-              assert(0);
+              message_queue.set_fatal_error();
+              pthread_join(read_messages_thread, NULL);
+              return EXIT_FAILURE;
             }
             free_targetfile_name(dirname, path_type);
           }
@@ -586,8 +712,12 @@ void MulticastReceiver::session()
         DEBUG("MULTICAST_FILE_DATA(%d) message received\n",
           mmh->get_number());
         if (fd == -1) {
-            // MULTICAST_FILE_RECORD message has not beet received
-            assert(0);
+          assert(filename != NULL);
+          DEBUG("Ignore MULTICAST_FILE_DATA for %s\n", filename);
+          // MULTICAST_FILE_RECORD message has not beet received, or
+          // file has not been created.
+          // Simply ignore data for such files
+          break;
         }
         if (length - sizeof(*mmh) > 0) {
           // Write the received data to the file
@@ -597,8 +727,12 @@ void MulticastReceiver::session()
           do {
             register int bytes_written = write(fd, data, size);
             if (bytes_written < 0) {
-              ERROR("File write error: %s\n", strerror(errno));
-              abort();
+              DEBUG("Write error for %s: %s\n", filename, strerror(errno));
+              register_error(STATUS_FATAL_DISK_ERROR,
+                "Write error for %s: %s\n", filename, strerror(errno));
+              message_queue.set_fatal_error();
+              pthread_join(read_messages_thread, NULL);
+              return EXIT_FAILURE;
             } else {
               size -= bytes_written;
               data = data + bytes_written;
@@ -610,51 +744,59 @@ void MulticastReceiver::session()
         DEBUG("MULTICAST_FILE_TRAILING(%d) message received\n",
           mmh->get_number());
         if (fd == -1) {
-          SERROR("MULTICAST_FILE_TRAILING message without corresponding "
-            "MULTICAST_FILE_RECORD message received\n");
-          assert(0);
+          assert(filename != NULL);
+          DEBUG("Ignore MULTICAST_FILE_TRAILING for %s\n", filename);
+          break;
         }
         checksum.final();
-        if (length < sizeof(*mmh) + sizeof(checksum.signature)) {
-          SERROR("Incomplete MULTICAST_FILE_TRAILING message received\n");
-          assert(0);
-        }
+        if (length >= sizeof(*mmh) + sizeof(checksum.signature)) {
 #if 0
-        if (rand() % 20 == 0) {
-          *(uint8_t *)(mmh + 1) = '\0';
-        }
+          // Change checksum for debugging purposes
+          if (rand() % 20 == 0) {
+            *(uint8_t *)(mmh + 1) = '\0';
+          }
 #endif
 
 #ifndef NDEBUG
-        SDEBUG("Calculated checksum: ");
-        checksum.display_signature(stdout, checksum.signature);
-        printf("\n");
-        SDEBUG("Received checksum: ");
-        checksum.display_signature(stdout, (uint8_t *)(mmh + 1));
-        printf("\n");
+          SDEBUG("Calculated checksum: ");
+          checksum.display_signature(stdout, checksum.signature);
+          printf("\n");
+          SDEBUG("Received checksum: ");
+          checksum.display_signature(stdout, (uint8_t *)(mmh + 1));
+          printf("\n");
 #endif
-        if (memcmp(checksum.signature, (uint8_t *)(mmh + 1),
-            sizeof(checksum.signature)) != 0) {
-          // Request for the file retransmission
-          ERROR("Incorrect checksum for the file %s, pending request for the "
-            "retransmission\n", filename + file_info_header.get_name_offset());
-          error_queue.add_retrans_request(filename, file_info_header,
-            session_id, local_address);
-        }
+          if (memcmp(checksum.signature, (uint8_t *)(mmh + 1),
+              sizeof(checksum.signature)) != 0) {
+            // Request for the file retransmission
+            ERROR("Incorrect checksum for the file %s, pending request "
+              "for the retransmission\n", filename +
+              file_info_header.get_name_offset());
+            error_queue.add_retrans_request(filename, file_info_header,
+              session_id, local_address);
+          }
       
-        close(fd);
-        fd = -1;
+          close(fd);
+          fd = -1;
+        } else {
+          SDEBUG("Incomplete MULTICAST_FILE_TRAILING message received\n");
+        }
         break;
       case MULTICAST_TERMINATION_REQUEST:
         // Finish work
         message_queue.signal_termination_synchronization();
-        pthread_join(read_data_thread, NULL);
-        return;
+        void *status;
+        pthread_join(read_messages_thread, &status);
+        if (status != NULL) {
+          return EXIT_SUCCESS;
+        } else {
+          return EXIT_FAILURE;
+        }
         break;
       default:
-        SDEBUG("Error condition\n");
-        abort();
+        DEBUG("Message of unknown type %d received\n", mmh->get_message_type());
     }
-  }
+    mmh = (MulticastMessageHeader *)message_queue.get_message(&length);
+  } while (mmh != NULL);
+  return EXIT_FAILURE;
 }
 

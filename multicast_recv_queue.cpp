@@ -37,7 +37,7 @@ void MulticastRecvQueue::wait_termination_synchronization()
 {
   pthread_mutex_lock(&mutex);
   DEBUG("wait_termination_synchronization n_messages: %d\n", n_messages);
-  if (n_messages > 0) {
+  if (n_messages > 0 && n_messages < UINT_MAX) {
     pthread_cond_wait(&termination_cond, &mutex);
     SDEBUG("termination_cond occurred\n");
   }
@@ -49,6 +49,16 @@ void MulticastRecvQueue::signal_termination_synchronization()
 {
   pthread_mutex_unlock(&mutex);
   SDEBUG("signal_termination_synchronization\n");
+  pthread_cond_signal(&termination_cond);
+  pthread_mutex_unlock(&mutex);
+}
+
+// Set queue to the error state
+void MulticastRecvQueue::set_fatal_error() {
+  pthread_mutex_unlock(&mutex);
+  n_messages = UINT_MAX;
+  SDEBUG("Fatal error occurred, waking the receiving process\n");
+  pthread_cond_signal(&data_ready_cond);
   pthread_cond_signal(&termination_cond);
   pthread_mutex_unlock(&mutex);
 }
@@ -66,6 +76,12 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
     if (cyclic_less_or_equal(first_num + buffer.size(), number)) {
       // Enlarge the buffer, FIXME: some limit check required here (may be)
       unsigned element = first_num + buffer.size() - 1;
+      if ((unsigned)buffer.size() + number - element >=
+          (unsigned)MAX_QUEUE_SIZE) {
+        SDEBUG("Maximum buffer size reached\n");
+        pthread_mutex_unlock(&mutex);
+        return -1;
+      }
       while (element != number) {
         SDEBUG("Enlarge the buffer\n");
         buffer.push_back(new MessageRecord());
@@ -94,7 +110,7 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
   } else {
     // Retransmission received
     if (cyclic_less(number, first_num) || n_messages == 0) {
-      SDEBUG("Retransmission for the already processed packet received\n");
+      SDEBUG("Retransmission for an already processed packet received\n");
       pthread_mutex_unlock(&mutex);
       return 0;
     }
@@ -116,8 +132,14 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
 void* MulticastRecvQueue::get_message(size_t *length)
 {
   pthread_mutex_lock(&mutex);
-  while (n_messages == 0 || buffer[0]->length == 0) {
+  while (n_messages == 0 || n_messages != UINT_MAX && buffer[0]->length == 0) {
     pthread_cond_wait(&data_ready_cond, &mutex);
+  }
+
+  if (n_messages == UINT_MAX) {
+    // This condition means that some fatal error has occurred
+    pthread_mutex_unlock(&mutex);
+    return NULL;
   }
 
   DEBUG("Get the message: %u\n", first_num);

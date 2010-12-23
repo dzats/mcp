@@ -19,7 +19,11 @@ class MulticastReceiver
   static const unsigned MIN_ERROR_RETRANS_TIMEOUT = 20; // milliseconds
   static const unsigned MAX_ERROR_RETRANS_TIMEOUT = 1000; // milliseconds
   static const unsigned MAX_ERROR_RETRANS_LINEAR_ADD = 8; // milliseconds
+#ifdef NDEBUG
+  static const unsigned MAX_IDLE_TIME = 30000; // milliseconds
+#else
   static const unsigned MAX_IDLE_TIME = 8000; // milliseconds
+#endif
 
   int sock; // Socket used for connection
   const struct sockaddr_in& source_addr; // Address of the multicast sender
@@ -45,28 +49,38 @@ class MulticastReceiver
   char *filename; // name of the current file/directory
   MD5sum checksum; // checksum for files
 
-  // Sends a UDP datagram to the multicast sender
-  void send_datagram(void *data, size_t size);
-
-  // Send a reply for the packet 'number' to the source
-  void send_reply(uint32_t number);
+  // Register an error to be delivered
+  void register_error(uint8_t status, const char *fmt, ...);
 
   // Get next timeout value for an error message retransmission
   unsigned get_error_retrans_timeout(unsigned prev_timeout);
+
+  // Sends a UDP datagram to the multicast sender
+  // Returns zero on success and error code otherwise
+  int send_datagram(void *data, size_t size);
+
+  // Send a reply for the packet 'number' to the source
+  // Returns zero on success and error code otherwise.
+  int send_reply(uint32_t number);
+
+  // Sends error message with information about packets
+  // that have not been received.
+  // Returns zero on success and error code otherwise.
+  int send_missed_packets(uint32_t message_number);
 
   // This method implements something like the TCP's TIME_WAIT state. It waits
   // for possible retransmissions of the MULTICAST_TERMINATION_REQUEST message.
   void time_wait(uint8_t * const buffer);
 
-  // Sends error message with information about packets that have not been
-  // received.
-  void send_missed_packets(uint32_t message_number);
+  // Finish the multicast receiver process if there were no messages from
+  // the multicast sender during MAX_IDLE_TIME
+  void exit_on_timeout_from_read_messages();
 
-  // This routine reads data from the connection and put it into the queue
-  void read_data();
+  // This routine reads messages from the connection and put it into the queue
+  void read_messages();
 
-  // Wrapper function to run the read_data method in a separate thread
-  static void* read_data_wrapper(void *arg);
+  // Wrapper function to run the read_messages method in a separate thread
+  static void* read_messages_wrapper(void *arg);
 public:
   MulticastReceiver(int s, const struct sockaddr_in& saddr,
       uint32_t sid, uint32_t local_addr, uint32_t interface_addr) :
@@ -89,6 +103,6 @@ public:
   }
 
   // The main routine which handles the multicast connection
-  void session();
+  int session();
 };
 #endif

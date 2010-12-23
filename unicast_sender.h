@@ -45,7 +45,7 @@ private:
   uint64_t write_to_socket(int sock, uint64_t size);
 
   // Register an error and finish the current task
-  void register_error(uint8_t status, uint32_t address, const char *fmt,
+  void register_error(uint8_t status, const char *fmt, uint32_t address,
     const char *error);
 public:
   uint32_t target_address; // address of next immediate destination

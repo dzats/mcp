@@ -21,29 +21,29 @@ protected:
   }
   ~Writer()
   {
-    pthread_mutex_lock(&reader->_mutex);
+    pthread_mutex_lock(&reader->mutex);
     w->is_present = false;
     pthread_cond_signal(&reader->space_ready_cond);
     if (reader->all_writers_done()) {
       pthread_cond_signal(&reader->writers_finished_cond);
     }
-    pthread_mutex_unlock(&reader->_mutex);
+    pthread_mutex_unlock(&reader->mutex);
   }
 
   Reader::TaskHeader* get_task()
   {
-    pthread_mutex_lock(&reader->_mutex);
-    while (w->is_done) {
+    pthread_mutex_lock(&reader->mutex);
+    while (w->is_done && w->status < STATUS_FIRST_FATAL_ERROR) {
       // Wait for the new task become available
-      pthread_cond_wait(&reader->operation_ready_cond, &reader->_mutex);
+      pthread_cond_wait(&reader->operation_ready_cond, &reader->mutex);
     }
-    pthread_mutex_unlock(&reader->_mutex);
+    pthread_mutex_unlock(&reader->mutex);
     return &reader->operation;
   }
 
   void submit_task()
   {
-    pthread_mutex_lock(&reader->_mutex);
+    pthread_mutex_lock(&reader->mutex);
     w->is_done = true;
     if (w->status != STATUS_OK) {
       pthread_cond_signal(&reader->space_ready_cond);
@@ -51,7 +51,7 @@ protected:
     if (reader->all_writers_done()) {
       pthread_cond_signal(&reader->writers_finished_cond);
     }
-    pthread_mutex_unlock(&reader->_mutex);
+    pthread_mutex_unlock(&reader->mutex);
   }
 
   int get_data() { return reader->get_data(w); }

@@ -51,6 +51,18 @@ void MulticastErrorQueue::add_retrans_request(const char *filename,
   pthread_mutex_unlock(&mutex);
 }
 
+// Add text error to be send to the source
+void MulticastErrorQueue::add_text_error(uint8_t status,
+    const char *error, uint32_t session_id, uint32_t local_address)
+{
+  pthread_mutex_lock(&mutex);
+  errors.push_front(new TextError(status, error,
+    session_id, next_packet_number, local_address));
+  next_packet_number++;
+  n_errors++;
+  pthread_mutex_unlock(&mutex);
+}
+
 // Move retransmission for the file 'fimename' in the end of the queue
 std::list<MulticastErrorQueue::ErrorMessage*>::iterator
 MulticastErrorQueue::get_error()
@@ -73,8 +85,9 @@ void MulticastErrorQueue::move_back(
   pthread_mutex_unlock(&mutex);
 }
 
-// Move the error message with the number 'number' from the queue
-void MulticastErrorQueue::remove(uint32_t number)
+// Remove the error message with the number 'number' from the queue.
+// Returns status of the removed message.
+uint8_t MulticastErrorQueue::remove(uint32_t number)
 {
   pthread_mutex_lock(&mutex);
   std::list<ErrorMessage*>::iterator i;
@@ -83,9 +96,14 @@ void MulticastErrorQueue::remove(uint32_t number)
       delete *i;
       errors.erase(i);
       n_errors--;
-      break;
+      MulticastMessageHeader *mmh = (MulticastMessageHeader *)(*i)->message;
+      ReplyHeader *rh = (ReplyHeader *)(mmh + 1);
+      uint8_t result = rh->get_status();
+      pthread_mutex_unlock(&mutex);
+      return result;
     }
   }
   pthread_mutex_unlock(&mutex);
+  return STATUS_OK;
 }
 

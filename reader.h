@@ -12,8 +12,6 @@
 // connection
 class Reader : public Distributor
 {
-public:
-  static const int MAX_ERROR_MESSAGE_SIZE = MAXPATHLEN + 160;
 protected:
   Reader() {}
 

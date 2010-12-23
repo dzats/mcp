@@ -91,8 +91,8 @@ int UnicastSender::choose_destination(const std::vector<Destination>& dst)
 }
 
 // Register an error and finish the current task
-void UnicastSender::register_error(uint8_t status, uint32_t address,
-    const char *fmt, const char *error)
+void UnicastSender::register_error(uint8_t status,
+    const char *fmt, uint32_t address, const char *error)
 {
   struct in_addr addr;
   addr.s_addr = ntohl(address);
@@ -106,7 +106,9 @@ void UnicastSender::register_error(uint8_t status, uint32_t address,
   DEBUG("register error: %s\n", error_message);
   reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
     error_message, strlen(error_message)));
-  reader->unicast_sender.status = status;
+  if (reader->unicast_sender.status < status) {
+    reader->unicast_sender.status = status;
+  }
   // Finish the unicast sender
   submit_task();
 }
@@ -199,9 +201,9 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
             retries_remaining);
         } else {
           // Fatal error: Too many retransmissions
-          register_error(STATUS_UNICAST_INIT_ERROR, target_address,
+          register_error(STATUS_UNICAST_INIT_ERROR,
             "Can't establish unicast connection with the host %s: %s",
-            "Too many retransmissions");
+            target_address, "Too many retransmissions");
           close(sock);
           sock = -1;
           return -1;
@@ -243,8 +245,9 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
     } catch(std::exception& e) {
       // Can't receive an error, generate it
     }
-    register_error(STATUS_UNICAST_INIT_ERROR, target_address,
-      "Can't establish unicast connection with the host %s: %s", e.what());
+    register_error(STATUS_UNICAST_INIT_ERROR,
+      "Can't establish unicast connection with the host %s: %s",
+      target_address, e.what());
     close(sock);
     sock = -1;
     return -1;
@@ -425,8 +428,9 @@ int UnicastSender::session()
     } catch(std::exception& e) {
       // Can't receive an error, generate it
     }
-    register_error(STATUS_UNICAST_CONNECTION_ERROR, target_address,
-      "Error during unicast transmission with the host %s: %s", e.what());
+    register_error(STATUS_UNICAST_CONNECTION_ERROR,
+      "Error during unicast transmission with the host %s: %s",
+      target_address, e.what());
     close(sock);
     sock = -1;
     return -1;

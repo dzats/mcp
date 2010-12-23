@@ -87,7 +87,11 @@ public:
 
   // Add retransmission for the file 'fimename' to the queue
   void add_retrans_request(const char *filename, const FileInfoHeader& finfo,
-      uint32_t session_id, uint32_t local_address);
+    uint32_t session_id, uint32_t local_address);
+
+  // Add text error to be send to the source
+  void add_text_error(uint8_t status, const char *error, uint32_t session_id,
+    uint32_t local_address);
 
   // Move retransmission for the file 'fimename' in the end of the queue
   std::list<ErrorMessage*>::iterator get_error();
@@ -95,8 +99,9 @@ public:
   // Move the error message pointed by 'arg' to the end of the queue
   void move_back(const std::list<ErrorMessage*>::iterator& arg);
 
-  // Move the error message with the number 'number' from the queue
-  void remove(uint32_t number);
+  // Remove the error message with the number 'number' from the queue
+  // Returns status of the removed message.
+  uint8_t remove(uint32_t number);
 };
 #endif
 

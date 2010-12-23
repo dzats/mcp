@@ -17,10 +17,10 @@ using namespace std;
 void Distributor::SimpleError::display() const
 {
   if (address != INADDR_NONE) {
-    char host_addr[INET_ADDRSTRLEN];
+    char host[INET_ADDRSTRLEN];
+    uint32_t addr = htonl(address);
     ERROR("from host %s: %s\n",
-      inet_ntop(AF_INET, &address, host_addr, sizeof(host_addr)),
-      message);
+      inet_ntop(AF_INET, &addr, host, sizeof(host)), message);
   } else {
     ERROR("%s\n", message);
   }
@@ -36,7 +36,7 @@ void Distributor::SimpleError::send(int sock)
       if(getsockname(sock, (struct sockaddr *)&addr, &addr_len) != 0) {
         ERROR("Can't get address from socket: %s", strerror(errno));
       } else {
-        address = addr.sin_addr.s_addr;
+        address = ntohl(addr.sin_addr.s_addr);
       }
     }
   
@@ -98,7 +98,7 @@ void Distributor::FileRetransRequest::send(int sock)
     if(getsockname(sock, (struct sockaddr *)&addr, &addr_len) != 0) {
       ERROR("Can't get address from socket: %s", strerror(errno));
     } else {
-      address = addr.sin_addr.s_addr;
+      address = ntohl(addr.sin_addr.s_addr);
     }
   }
 
@@ -119,7 +119,7 @@ void Distributor::FileRetransRequest::send(int sock)
     *addr = htonl(i->addr);
     addr++;
   }
-  *addr = htonl(INADDR_NONE);
+  *addr = INADDR_NONE;
   try {
     ReplyHeader h(status, address, message_length);
     sendn(sock, &h, sizeof(h), 0);
@@ -228,7 +228,7 @@ Distributor::Distributor() : is_reader_awaiting(false),
   reader.is_present = true;
 
   buffer = (uint8_t*)malloc(DEFAULT_BUFFER_SIZE);
-  pthread_mutex_init(&_mutex, NULL);
+  pthread_mutex_init(&mutex, NULL);
   pthread_cond_init(&space_ready_cond, NULL);
   pthread_cond_init(&data_ready_cond, NULL);
   pthread_cond_init(&operation_ready_cond, NULL);
@@ -239,7 +239,7 @@ Distributor::Distributor() : is_reader_awaiting(false),
 void Distributor::add_task(const FileInfoHeader& fileinfo,
     const char* filename)
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
   operation.fileinfo = fileinfo;
   operation.set_filename(filename);
   // Set the buffer to the default state
@@ -267,14 +267,14 @@ void Distributor::add_task(const FileInfoHeader& fileinfo,
   }
   // Wake up the readers
   pthread_cond_broadcast(&operation_ready_cond);
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
 // Signal that the reader has finished the task and wait for the readers
 // Returns class of the most critical error
 uint8_t Distributor::finish_task()
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
   reader.is_done = true;
 
   // Wake up the writers
@@ -285,7 +285,7 @@ uint8_t Distributor::finish_task()
 
   // Wait until the writers accomplish the task
   while (!all_done()) {
-    pthread_cond_wait(&writers_finished_cond, &_mutex);
+    pthread_cond_wait(&writers_finished_cond, &mutex);
   }
 
   // Get the task status
@@ -300,18 +300,18 @@ uint8_t Distributor::finish_task()
     status = multicast_sender.status;
   }
 
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   return status;
 }
 
 // It is combination of the add_task for trailing task and finish_task
 uint8_t Distributor::finish_work()
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
   // Warning the task must be finished
   while (!all_done()) {
     // Wait until the readers accomplish the previous task
-    pthread_cond_wait(&writers_finished_cond, &_mutex);
+    pthread_cond_wait(&writers_finished_cond, &mutex);
   }
   SDEBUG("Set the trailing task\n");
   // Move the trailing record to the operation->fileinfo
@@ -341,8 +341,11 @@ uint8_t Distributor::finish_work()
 
   // Wait until the writers accomplish the task
   while (!all_done()) {
-    pthread_cond_wait(&writers_finished_cond, &_mutex);
+    pthread_cond_wait(&writers_finished_cond, &mutex);
   }
+
+  // Additional wake up for the multithreaded multicast sender
+  pthread_cond_broadcast(&operation_ready_cond);
 
   // Get the task status
   uint8_t status = reader.status;
@@ -357,7 +360,7 @@ uint8_t Distributor::finish_work()
   }
 
   SDEBUG("The finish_work method exited\n");
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   return status;
 }
 
@@ -370,28 +373,28 @@ uint8_t Distributor::finish_work()
 int Distributor::get_data(Client *w)
 {
   int count;
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
   count = _get_data(w->offset);
   while (count == 0) {
     if (reader.is_done) {
 #ifdef BUFFER_DEBUG
       SDEBUG("writer %p is done, wake up reader\n", w);
 #endif
-      pthread_mutex_unlock(&_mutex);
+      pthread_mutex_unlock(&mutex);
       return 0;
     } else {
 #ifdef BUFFER_DEBUG
       SDEBUG("writer %p is going to sleep\n", w);
 #endif
       are_writers_awaiting = true;
-      pthread_cond_wait(&data_ready_cond, &_mutex);
+      pthread_cond_wait(&data_ready_cond, &mutex);
       count = _get_data(w->offset);
 #ifdef BUFFER_DEBUG
       DEBUG("awake attempt for the reader %p (%d)\n", w, count);
 #endif
     }
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   assert(count > 0);
   return count;
 }
@@ -404,21 +407,21 @@ int Distributor::get_data(Client *w)
 int Distributor::get_space()
 {
   int count;
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
   count = _get_space();
   while (count == 0) {
 #ifdef BUFFER_DEBUG
     SDEBUG("get_space: reader is going to sleep\n");
 #endif
     is_reader_awaiting = true;
-    pthread_cond_wait(&space_ready_cond, &_mutex);
+    pthread_cond_wait(&space_ready_cond, &mutex);
     count = _get_space();
     is_reader_awaiting = false;
 #ifdef BUFFER_DEBUG
     DEBUG("get_space: awake attempt for the reader (%d)\n", count);
 #endif
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   assert(count > 0);
   assert((reader.offset & DEFAULT_BUFFER_MASK) + count <= DEFAULT_BUFFER_SIZE);
   return count;
@@ -426,7 +429,7 @@ int Distributor::get_space()
 
 void Distributor::update_reader_position(int count)
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
 #ifdef BUFFER_DEBUG
   DEBUG("rposition update: %d -> ", reader.offset);
 #endif
@@ -447,14 +450,14 @@ void Distributor::update_reader_position(int count)
     are_writers_awaiting = false;
     pthread_cond_broadcast(&data_ready_cond);
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
 // Move w->offset to the count bytes left (cyclic)
 // Count should not be greater than zero.
 void Distributor::update_writer_position(int count, Client *w)
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
 #ifdef BUFFER_DEBUG
   DEBUG("update_writer_position: %d -> ", w->offset);
 #endif
@@ -468,7 +471,7 @@ void Distributor::update_writer_position(int count, Client *w)
 #endif
     pthread_cond_signal(&space_ready_cond);
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
 // Put data into the buffer

@@ -213,7 +213,7 @@ int FileReader::handle_directory_with_content(char *name,
     if ((dirp = opendir(dirname)) == NULL) {
       // Errors are allowed here (EACCES) for example, but these
       // errors should be reported about.
-      ERROR("%s: %s\n", dirname, strerror(errno));
+      ERROR("Can't read directory %s: %s\n", dirname, strerror(errno));
       continue;
     }
 

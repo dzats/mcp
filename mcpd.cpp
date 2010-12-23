@@ -190,6 +190,9 @@ int main(int argc, char **argv)
   bool debug_mode = false;
   bool unicast_only = false;
   bool multicast_only = false;
+#ifdef USE_MULTICAST
+  unsigned multicast_sender_number = 0;
+#endif
 
   // Set speed for the pseudo-random numbers
   struct timeval tv;
@@ -383,7 +386,7 @@ int main(int argc, char **argv)
 
   // Become a daemon process and proceeed to the home directory
   if (!debug_mode) {
-    daemon(1, 1);
+    daemon(1, 0);
     char *homedir;
     if ((homedir = getenv("HOME")) == NULL ||
       chdir(homedir) != 0) {
@@ -508,14 +511,14 @@ int main(int argc, char **argv)
                 close(multicast_sockets[i]);
               }
               // Create a MulticastReceiver object
-              MulticastReceiver *recv = new MulticastReceiver(ephemeral_sock,
-                source_addr, mmh->get_session_id(), local_address,
-                addresses[sock_num]);
-              recv->session();
+              MulticastReceiver *multicast_receiver =
+                new MulticastReceiver(ephemeral_sock, source_addr,
+                mmh->get_session_id(), local_address, addresses[sock_num]);
+              int status = multicast_receiver->session();
               // finish the work
-              delete recv;
+              delete multicast_receiver;
               DEBUG("Process %u finished\n", getpid());
-              exit(EXIT_FAILURE); // FIXME: not failure
+              exit(status);
             } else if (pid > 0) {
               // Session established, continue work
               close(ephemeral_sock);
@@ -588,11 +591,14 @@ int main(int argc, char **argv)
           unicast_receiver->flags); 
   
         const vector<Destination> *remaining_dst;
+#ifdef USE_MULTICAST
         if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0) {
           multicast_sender = MulticastSender::create_and_initialize(
             unicast_receiver->destinations, &remaining_dst,
             unicast_receiver->n_sources, false, unicast_receiver,
-            MulticastSender::server_mode, multicast_port, 0);
+            MulticastSender::server_mode, multicast_port,
+            multicast_sender_number);
+          ++multicast_sender_number;
           if (remaining_dst == NULL) {
             // Some error occurred during the multicast sender initialization
             unicast_receiver->send_errors(client_sock);
@@ -614,6 +620,9 @@ int main(int argc, char **argv)
           }
           is_multicast_sender_started = true;
         }
+#else
+        remaining_dst = &unicast_receiver->destinations;
+#endif
   
         // Run the unicast sender sender
         if (remaining_dst->size() > 0) {

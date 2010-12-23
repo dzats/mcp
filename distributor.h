@@ -188,7 +188,7 @@ public:
 
 protected:
   // State signaling variables
-  pthread_mutex_t _mutex; // mutex that protect changes of offset and state
+  pthread_mutex_t mutex; // mutex that protect changes of offset and state
   pthread_cond_t space_ready_cond; // State change condition
   volatile bool is_reader_awaiting;
   pthread_cond_t data_ready_cond; // State change condition
@@ -203,13 +203,13 @@ protected:
 
   /*
     Internal funcion that return space available for write
-    _mutex should be locked.
+    mutex should be locked.
   */
   int _get_space();
 
   /*
     Internal funcion that return space available for read
-    _mutex should be locked.
+    mutex should be locked.
   */
   inline int _get_data(int offset);
 
@@ -288,8 +288,18 @@ public:
     pthread_cond_destroy(&operation_ready_cond);
     pthread_cond_destroy(&data_ready_cond);
     pthread_cond_destroy(&space_ready_cond);
-    pthread_mutex_destroy(&_mutex);
+    pthread_mutex_destroy(&mutex);
   }
+
+  // Updates status of the multicast sender (thread safe)
+  void update_multicast_sender_status(uint8_t status) {
+    pthread_mutex_lock(&mutex);
+    if (multicast_sender.status < status) {
+      multicast_sender.status = status;
+    }
+    pthread_mutex_unlock(&mutex);
+  }
+
 
   // Sends the occurred error to the imediate source
   void send_errors(int sock)
@@ -314,7 +324,7 @@ public:
 
 /*
   Internal funcion that return space available for read
-  _mutex should be locked.
+  mutex should be locked.
 */
 inline int Distributor::_get_data(int offset)
 {
@@ -329,7 +339,7 @@ inline int Distributor::_get_data(int offset)
 
 /*
   Internal funcion that return space available for write
-  _mutex should be locked.
+  mutex should be locked.
 */
 inline int Distributor::_get_space()
 {

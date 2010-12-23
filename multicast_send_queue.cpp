@@ -12,8 +12,9 @@ using namespace std;
 
 MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
     unsigned *rtts) : store_position(0), data_on_flow(0),
-    window_size(INITIAL_WINDOW_SIZE),
-    ssthresh(UINT_MAX), is_queue_full(false)
+    window_size(INITIAL_WINDOW_SIZE), ssthresh(UINT_MAX),
+    last_packet_caused_congestion(UINT32_MAX),
+    is_queue_full(false), is_fatal_error_occurred(false)
 {
   n_destinations = targets.size();
   buffer = std::deque<MessageRecord*>(max(n_destinations * DEFAULT_BUFFER_SCALE,
@@ -31,6 +32,8 @@ MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
       max_round_trip_time = rtts[i];
     }
   }
+  last_retransmission = UINT32_MAX;
+  gettimeofday(&last_retransmission_time, NULL);
   
   first_to_acknowledge = new unsigned[n_destinations];
   memset(first_to_acknowledge, 0, sizeof(unsigned) * n_destinations);
@@ -60,7 +63,7 @@ MulticastSendQueue::~MulticastSendQueue()
   pthread_cond_destroy(&transmission_finished_cond);
 }
 
-// Wait for free space in the buffer
+// Wait for free space in the buffer, mutex should be locked
 int MulticastSendQueue::wait_for_space(unsigned timeout) {
   struct timeval current_time;
   struct timespec till_time;
@@ -88,16 +91,20 @@ int MulticastSendQueue::wait_for_space(unsigned timeout) {
 }
 
 // Add message to the queue
-void* MulticastSendQueue::store_message(const void *message, size_t size,
+const void* MulticastSendQueue::store_message(const void *message, size_t size,
     size_t *retrans_message_size)
 {
   assert(size <= MAX_UDP_PACKET_SIZE);
   struct timeval current_time;
+  if (is_fatal_error_occurred) {
+    throw MulticastException(MulticastException::fatal_error_received,
+      INADDR_NONE);
+  }
   pthread_mutex_lock(&mutex);
   DEBUG("missed: %zu, max_rtt: %u\n", missed_packets.size(),
     max_round_trip_time);
 
-  void *message_for_retransmission = NULL;
+  const void *message_to_send = message;
   while (missed_packets.size() > 0) {
     // Some packets have been missed
     unsigned number = *missed_packets.begin();
@@ -108,16 +115,16 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
     DEBUG("error offset: %d\n", offset);
 
     if (offset < store_position) {
-      message_for_retransmission = buffer[offset]->message;
+      message_to_send = buffer[offset]->message;
       *retrans_message_size = buffer[offset]->size;
-      buffer[offset]->timestamp = (struct timeval) {0, 0};
+      buffer[offset]->timestamp.tv_sec = 0;
       break;
     } else {
       DEBUG("Retransmission request for %u is outdated\n", number);
     }
   }
 
-  if (message_for_retransmission == NULL &&
+  if (message_to_send == message &&
       store_position > n_destinations * 2 + (window_size >> 9) + 7) {
     /*
       The previlus rude expression means n_destinations * 2 + channel capacity.
@@ -127,6 +134,7 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
       the messages in the buffer. TODO: In the latter case delay the
       retransmission by max_round_trip_time * 2
     */
+    SDEBUG("Buffer is full\n");
     unsigned min_unaknowledged = UINT_MAX;
     unsigned i = 0;
     bool is_message_for_retransmission_choosen = false;
@@ -142,21 +150,27 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
           if (buffer[i]->timestamp.tv_sec > 0) {
             // The next search should start with the next position
             *retrans_message_size = buffer[i]->size;
-            message_for_retransmission = buffer[i]->message;
+            message_to_send = buffer[i]->message;
             is_message_for_retransmission_choosen = true;
             gettimeofday(&current_time, NULL);
+            struct timeval packet_send_time = buffer[i]->timestamp;
             unsigned timeout = (round_trip_times[t - target_addresses] << 1) -
               ((current_time.tv_sec - buffer[i]->timestamp.tv_sec) * 1000000 +
               current_time.tv_usec - buffer[i]->timestamp.tv_usec);
-            if (timeout < INT_MAX) {
+            assert(timeout < 1000000 || timeout > INT_MAX);
+            if (timeout < 1000000) {
               if (wait_for_space(timeout) == 0) {
                 // Space has been freed
-                message_for_retransmission = NULL;
+                SDEBUG("Space has been freed\n");
+                message_to_send = message;
               } else {
                 // Timeout expired
+                buffer[i]->timestamp.tv_sec = 0;
               }
+            } else {
+              // Timeout has already expired
+              buffer[i]->timestamp.tv_sec = 0;
             }
-            buffer[i]->timestamp = (struct timeval) {0, 0};
             break;
           } else {
             if (min_unaknowledged == UINT_MAX) {
@@ -170,14 +184,33 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
       SDEBUG("At least one retransmission performed for all packets\n");
       assert(min_unaknowledged != UINT_MAX);
       *retrans_message_size = buffer[min_unaknowledged]->size;
-      message_for_retransmission = buffer[min_unaknowledged]->message;
+      message_to_send = buffer[min_unaknowledged]->message;
 
       // Delay retransmission for MAX_RTT
       if (wait_for_space(max_round_trip_time) == 0) {
         // Space has been freed
-        message_for_retransmission = NULL;
+        message_to_send = message;
       } else {
         // Timeout expired
+        MulticastMessageHeader *mmh =
+          (MulticastMessageHeader *)buffer[min_unaknowledged]->message;
+        if (mmh->get_number() == last_retransmission) {
+          SDEBUG("Reapeated retransmission\n");
+          struct timeval current_time;
+          gettimeofday(&current_time, NULL);
+          if ((unsigned)(current_time.tv_sec -
+              last_retransmission_time.tv_sec) > MAX_DESTINATION_IDLE_TIME) {
+            // The destination has not replied too long, terminate the
+            // connection
+            pthread_mutex_unlock(&mutex);
+            throw MulticastException(MulticastException::connection_timed_out,
+              mmh->get_responder());
+          }
+        } else {
+          last_retransmission = mmh->get_number();
+          gettimeofday(&last_retransmission_time, NULL);
+        }
+        buffer[min_unaknowledged]->timestamp.tv_sec = 0;
       }
     }
   }
@@ -194,7 +227,7 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
     data_delivered = data_on_flow;
   }
   // Some limitation to avoid unlimited grouth of window_size
-  if (data_on_flow * 2 > window_size) {
+  if (window_size < INT32_MAX) {
     // Change the window size
     if (ssthresh == UINT_MAX) {
       // Slow start
@@ -209,16 +242,18 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
   last_data_on_flow_evaluation = current_time;
   data_on_flow -= data_delivered;
   
-  if (message_for_retransmission == NULL) {
+  if (message_to_send == message) {
     data_on_flow += size;
     if (message == NULL) {
       // The request is simpy a check, whether some messages
       // should be retransmitted.
+      pthread_mutex_unlock(&mutex);
       return NULL;
     }
   } else {
     data_on_flow += *retrans_message_size;
   }
+
   if (data_on_flow > window_size) {
     // Delay the packet to avoid congestion
     // FIXME: Be careful to avoid overflow in the following expression
@@ -228,10 +263,12 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
     if (delay > 1000000) {
       delay = 1000000;
     }
+    pthread_mutex_unlock(&mutex);
     usleep(delay);
+    pthread_mutex_lock(&mutex);
   }
 
-  if (message_for_retransmission == NULL) {
+  if (message_to_send == message) {
     if (store_position == buffer.size()) {
       // Increase the buffer size instead
       buffer.push_back(new MessageRecord);
@@ -247,7 +284,7 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
     ++store_position;
   }
   pthread_mutex_unlock(&mutex);
-  return message_for_retransmission;
+  return message_to_send;
 }
 
 // Acknowledge receiving all the messages till 'number' by 'destination'
@@ -283,7 +320,11 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
       current_time.tv_usec - buffer[offset]->timestamp.tv_usec;
     DEBUG("Received round trip time: %d\n", received_rtt);
     unsigned previous_rtt = round_trip_times[destination];
-    round_trip_times[destination] = received_rtt + (received_rtt >> 1);
+    if (round_trip_times[destination] * 2 > received_rtt) {
+      round_trip_times[destination] = received_rtt;
+    } else {
+      round_trip_times[destination] += round_trip_times[destination] >> 2;
+    }
 
     if (max_round_trip_time < round_trip_times[destination]) {
       max_round_trip_time = round_trip_times[destination];
@@ -291,6 +332,8 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
       max_round_trip_time = *max_element(round_trip_times,
         round_trip_times + n_destinations);
     }
+    //assert(max_round_trip_time < 200000);
+    buffer[offset]->timestamp.tv_sec = 0;
   }
 
   if (termination_message != 0 &&
@@ -346,42 +389,77 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
 
 // Function registers that some of the packets has been missed
 void MulticastSendQueue::add_missed_packets(uint32_t number,
-    uint32_t destination, uint32_t *numbers, uint32_t *end)
+    int destination, uint32_t *numbers, uint32_t *end)
 {
-  end -= 2;
   DEBUG("add_missed_packets: %p, %p\n", numbers, end);
-  pthread_mutex_lock(&mutex);
-  while (numbers <= end) {
-    uint32_t i = ntohl(*numbers);
-    ++numbers;
-    for (; i <= ntohl(*numbers); ++i) {
-#ifndef NDEBUG
-      uint32_t dest_addr = htonl(destination);
-      char dest_name[INET_ADDRSTRLEN];
-      DEBUG("Packet %d has not been delivered to %s\n", i,
-        inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
-#endif
-      missed_packets.insert(i);
-    }
-    ++numbers;
-  }
-  is_some_destinations_replied = true;
+
+  // Update the Round-Trip Time information, if there were no
+  // retransmissions for this packet
   unsigned offset = number -
-    ((MulticastMessageHeader *)buffer.front()->message)->get_number();
+    ((MulticastMessageHeader *)buffer[0]->message)->get_number();
   DEBUG("offset: %u, first: %u, number: %u\n", offset,
     ((MulticastMessageHeader *)buffer.front()->message)->get_number(),
     number);
-  assert(offset < buffer.size());
-  if (offset >= buffer.size()) {
-    DEBUG("Incorrect message number: %u (%u)\n", number, offset);
-    return;
+  assert(offset < store_position);
+  if (offset < store_position && buffer[offset]->timestamp.tv_sec) {
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    unsigned received_rtt =
+      (current_time.tv_sec - buffer[offset]->timestamp.tv_sec) * 1000000 +
+      current_time.tv_usec - buffer[offset]->timestamp.tv_usec;
+    DEBUG("Received round trip time: %d\n", received_rtt);
+    unsigned previous_rtt = round_trip_times[destination];
+    if (round_trip_times[destination] * 2 > received_rtt) {
+      round_trip_times[destination] = received_rtt;
+    } else {
+      round_trip_times[destination] += round_trip_times[destination] >> 2;
+    }
+
+    if (max_round_trip_time < round_trip_times[destination]) {
+      max_round_trip_time = round_trip_times[destination];
+    } else if (max_round_trip_time == previous_rtt) {
+      max_round_trip_time = *max_element(round_trip_times,
+        round_trip_times + n_destinations);
+    }
+    //assert(max_round_trip_time < 200000);
+    //buffer[offset]->timestamp.tv_sec = 0;
   }
 
-  // FIXME: Check whether the algorithm is acceptable
-  buffer[offset]->timestamp = (struct timeval){0, 0};
-  ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
-  window_size = ssthresh + (ssthresh >> 1) + MAX_UDP_PACKET_SIZE * 3;
-  DEBUG("New window size: %u\n", window_size);
+  if (numbers != end) {
+    // Change window size if there were no messages about missed packets
+    // recently (during RTT)
+  	// FIXME: Check whether this algorithm is appropriate
+#if 0
+    if (number - last_packet_caused_congestion <
+        UINT32_MAX - MAX_EXPECTED_WINDOW_SIZE) {
+#endif
+      ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
+      window_size = ssthresh + (ssthresh >> 1) + MAX_UDP_PACKET_SIZE * 3;
+      DEBUG("New window size: %u\n", window_size);
+#if 0
+      last_packet_caused_congestion = 
+        ((MulticastMessageHeader *)buffer[store_position - 1]->message)->get_number();
+    }
+#endif
+
+    end -= 2;
+    pthread_mutex_lock(&mutex);
+    while (numbers <= end) {
+      uint32_t i = ntohl(*numbers);
+      ++numbers;
+      for (; i <= ntohl(*numbers); ++i) {
+#ifndef NDEBUG
+        uint32_t dest_addr = htonl(target_addresses[destination]);
+        char dest_name[INET_ADDRSTRLEN];
+        DEBUG("Packet %d has not been delivered to %s\n", i,
+          inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+#endif
+        missed_packets.insert(i);
+      }
+      ++numbers;
+    }
+  }
+  is_some_destinations_replied = true;
   pthread_mutex_unlock(&mutex);
 }
 
