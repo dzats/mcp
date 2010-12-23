@@ -68,8 +68,8 @@ void usage_and_exit(char *name)
   "\t\tserver will accept connections to all the local addresses.\n\n"
   "\t-p port\n"
   "\t\tSpecify port the server will use for both unicast and multicast \n"
-  "\t\tconnections instead of the default port ("
-  NUMBER_TO_STRING(UNICAST_PORT) ").\n\n" 
+  "\t\tconnections instead of the default ports ("
+  NUMBER_TO_STRING(UNICAST_PORT) ", " NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
   "\t-P port\n"
   "\t\tSpecify port the server will use for multicast connections\n"
   "\t\tinstead of the default port (" NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
@@ -149,7 +149,7 @@ void sigchld_handler(int signum)
 
 // Sends the multicast_init_reply message to 'destination_addr'
 static int send_multicast_init_reply(int sock, uint32_t session_id,
-    const vector<uint32_t>& addresses,
+    uint32_t number, const vector<uint32_t>& addresses,
     const struct sockaddr_in *destination_addr, unsigned delay)
 {
   // Compose the reply message
@@ -158,6 +158,7 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
   MulticastMessageHeader *reply_header =
     new(reply_message)MulticastMessageHeader(MULTICAST_INIT_REPLY,
     session_id);
+  reply_header->set_number(number);
   uint32_t *p = (uint32_t *)(reply_header + 1);
   for (unsigned i = 0; i < addresses.size(); ++i) {
     p[i] = htonl(addresses[i]);
@@ -219,6 +220,7 @@ int main(int argc, char **argv)
           ERROR("Invalid port: %s\n", optarg);
           exit(EXIT_FAILURE);
         }
+        break;
       case 'u': // Don't accept the multicast connections
         unicast_only = true;
         break;
@@ -268,11 +270,10 @@ int main(int argc, char **argv)
   int *multicast_sockets;
   struct pollfd *pfds;
   nfds_t n_pfds;
-  vector<uint32_t> *addresses; // Local IP addresses (non-loopback)
+  vector<uint32_t> addresses; // Local IP addresses (non-loopback)
 
-  // Some initialization routine for the multicast connection
   if (!unicast_only) {
-    // Started multicast sessions;
+    // Some initialization routine to accept multicast connections
 
     // Get the local ip addresses
     int sock;
@@ -281,10 +282,12 @@ int main(int argc, char **argv)
       ERROR("Can't create a UDP socket: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
     }
-    addresses = get_interfaces(sock);
+    if (get_local_addresses(sock, &addresses, NULL) != 0) {
+      exit(EXIT_FAILURE);
+    }
     close(sock);
 
-    n_multicast_sockets = addresses->size();
+    n_multicast_sockets = addresses.size();
     multicast_sockets = new int[n_multicast_sockets];
     n_pfds = n_multicast_sockets + (multicast_only ? 0 : 1);
     pfds = new pollfd[n_pfds];
@@ -324,7 +327,7 @@ int main(int argc, char **argv)
       struct in_addr maddr;
       maddr.s_addr = inet_addr(DEFAULT_MULTICAST_ADDR);
       memcpy(&mreq.imr_multiaddr, &maddr, sizeof(maddr));
-      mreq.imr_interface.s_addr = htonl((*addresses)[i]);
+      mreq.imr_interface.s_addr = htonl(addresses[i]);
   
       if (setsockopt(multicast_sockets[i], IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
           sizeof(mreq)) != 0) {
@@ -442,10 +445,10 @@ int main(int argc, char **argv)
         MulticastHostRecord *hr = (MulticastHostRecord *)(mmh + 1);
         vector<uint32_t> matches;
         uint32_t local_address = 0;
-        for(unsigned i = 0; i < addresses->size(); ++i) {
+        for(unsigned i = 0; i < addresses.size(); ++i) {
           for (unsigned j = 0; j < (len - sizeof(MulticastMessageHeader)) /
               sizeof(MulticastHostRecord); ++j) {
-            if (hr[j].get_addr() == (*addresses)[i]) {
+            if (hr[j].get_addr() == addresses[i]) {
               matches.push_back(hr[j].get_addr());
               if (local_address == 0) {
                 local_address = hr[j].get_addr();
@@ -495,7 +498,8 @@ int main(int argc, char **argv)
               }
             }
             send_multicast_init_reply(multicast_sockets[sock_num],
-              mmh->get_session_id(), matches, &source_addr, reply_delay);
+              mmh->get_session_id(), mmh->get_number(), matches, &source_addr,
+              reply_delay);
 
             // Create a new process, that will handle this connection
             pid_t pid = fork();
@@ -506,7 +510,7 @@ int main(int argc, char **argv)
               // Create a MulticastReceiver object
               MulticastReceiver *recv = new MulticastReceiver(ephemeral_sock,
                 source_addr, mmh->get_session_id(), local_address,
-                (*addresses)[sock_num]);
+                addresses[sock_num]);
               recv->session();
               // finish the work
               delete recv;
@@ -526,7 +530,8 @@ int main(int argc, char **argv)
             DEBUG("Session already established (number of sessions: %zu).\n",
               multicast_sessions.size());
             send_multicast_init_reply(multicast_sockets[sock_num],
-              mmh->get_session_id(), matches, &source_addr, reply_delay);
+              mmh->get_session_id(), mmh->get_number(), matches,
+              &source_addr, reply_delay);
           }
         }
       } else if(len != 0) {
@@ -582,44 +587,19 @@ int main(int argc, char **argv)
         FileWriter *file_writer = new FileWriter(unicast_receiver,
           unicast_receiver->flags); 
   
-        vector<Destination> *remaining_dst;
-#ifndef NDEBUG
+        const vector<Destination> *remaining_dst;
         if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0) {
-#else
-        if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0 && 
-            unicast_receiver->destinations.size() > 2) {
-#endif
-          multicast_sender = new MulticastSender(unicast_receiver,
-            MulticastSender::server_mode, unicast_port,
-            unicast_receiver->nsources, 0);
-          // Establish the multicast session
-          remaining_dst = multicast_sender->session_init(
-            unicast_receiver->destinations, unicast_receiver->nsources);
+          multicast_sender = MulticastSender::create_and_initialize(
+            unicast_receiver->destinations, &remaining_dst,
+            unicast_receiver->n_sources, false, unicast_receiver,
+            MulticastSender::server_mode, multicast_port, 0);
           if (remaining_dst == NULL) {
-            unicast_receiver->display_errors();
+            // Some error occurred during the multicast sender initialization
+            unicast_receiver->send_errors(client_sock);
             exit(EXIT_FAILURE);
           }
-          if ((unicast_receiver->flags & PRESERVE_ORDER_FLAG) == 0) {
-            // FIXME: Do something here to implement the preserve order policy
-          }
-#ifndef NDEBUG
-          SDEBUG("Destinations unreachable through multicast:\n");
-          for (vector<Destination>::const_iterator i = remaining_dst->begin();
-              i != remaining_dst->end(); ++i) {
-            printf("%d.", i->addr >> 24);
-            printf("%d.", i->addr >> 16 & 0xFF);
-            printf("%d.", i->addr >> 8 & 0xFF);
-            printf("%d: ", i->addr & 0xFF);
-            if (i->filename != NULL) {
-              printf("%s\n", &*(i->filename));
-            } else {
-              printf("\n");
-            }
-          }
-#endif
         } else {
-          remaining_dst = new vector<Destination>(
-            unicast_receiver->destinations);
+          remaining_dst = &unicast_receiver->destinations;
         }
 
         // FIXME: some other evaluation should done be here
@@ -633,10 +613,6 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
           }
           is_multicast_sender_started = true;
-        } else {
-          // Delete the multicast sender
-          delete multicast_sender;
-          multicast_sender = NULL;
         }
   
         // Run the unicast sender sender
@@ -647,7 +623,7 @@ int main(int argc, char **argv)
           SDEBUG("Initialize the unicast sender thread\n");
           int retval;
           if ((retval = unicast_sender->session_init(*remaining_dst,
-              unicast_receiver->nsources)) == 0) {
+              unicast_receiver->n_sources)) == 0) {
             // Start the unicast sender
             int error;
             error = pthread_create(&unicast_sender_thread, NULL,
@@ -719,9 +695,15 @@ int main(int argc, char **argv)
         }
   
         SDEBUG("Session finished, terminate the server\n");
+        close(client_sock);
+        if (remaining_dst != NULL &&
+            remaining_dst != &unicast_receiver->destinations) {
+          delete remaining_dst;
+        }
         delete file_writer;
         delete unicast_receiver;
-        close(client_sock);
+        if (unicast_sender != NULL) { delete unicast_sender; }
+        if (multicast_sender != NULL) { delete unicast_sender; }
         if (!debug_mode) {
           return EXIT_FAILURE;
         } else {

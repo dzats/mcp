@@ -9,6 +9,7 @@
 
 #include <vector>
 #include <set>
+#include <map>
 #include <algorithm>
 
 using namespace std;
@@ -23,7 +24,7 @@ uint16_t MulticastSender::choose_ephemeral_port()
   memset(&ephemeral_addr, 0, sizeof(ephemeral_addr));
   // FIXME: another address should be here
   ephemeral_addr.sin_family = AF_INET;
-  ephemeral_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  ephemeral_addr.sin_addr.s_addr = htonl(local_address);
   int bind_result;
   int tries = MAX_PORT_CHOOSING_TRIES;
   do {
@@ -55,178 +56,6 @@ void MulticastSender::register_error(uint8_t status, const char *fmt,
   submit_task();
 }
 
-/*
-  This is the initialization routine tries to establish the multicast
-  session with the destinations specified in dst. The return value
-  is a vector of destinations the connection has not been established
-  with.
-*/
-std::vector<Destination>* MulticastSender::session_init(
-    const std::vector<Destination>& dst, int nsources)
-{
-  // Clear the previous connection targets
-  targets.clear();
-  
-  // Fill up the multicast address to be used in the connection
-  memset(&target_address, 0, sizeof(target_address));
-  target_address.sin_family = AF_INET;
-  target_address.sin_addr.s_addr = address;
-  target_address.sin_port = htons(port);
-
-  sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock == -1) {
-    ERROR("Can't create a UDP socket: %s\n", strerror(errno));
-    register_error(STATUS_UNKNOWN_ERROR, "Can't create a UDP socket: %s",
-      strerror(errno));
-    return NULL;
-  }
-
-  // Choose a UDP port
-  errno = 0;
-  uint16_t ephemeral_port = choose_ephemeral_port();
-  if (ephemeral_port == 0) {
-    ERROR("Can't choose an ephemeral port: %s\n", strerror(errno));
-    register_error(STATUS_UNKNOWN_ERROR,
-      "Can't choose an ephemeral port: %s", strerror(errno));
-    return NULL;
-  }
-  DEBUG("Ephemeral port for the new connection is: %u\n", ephemeral_port);
-
-  // Compose the session initialization message
-  unsigned init_message_length = sizeof(MulticastMessageHeader) +
-    dst.size() * sizeof(MulticastHostRecord);
-  uint8_t init_message[init_message_length];
-  MulticastMessageHeader *mmh =
-    new(init_message)MulticastMessageHeader(MULTICAST_INIT_REQUEST, session_id);
-
-  MulticastHostRecord *hr = (MulticastHostRecord *)(mmh + 1);
-  MulticastHostRecord *hr_begin = hr;
-  for (uint32_t i = 0; i < dst.size(); ++i) {
-    hr->set_addr(dst[i].addr);
-    ++hr;
-  }
-  MulticastHostRecord *hr_end = hr;
-
-  // Start the session initialization procedure
-  vector<Destination> *result = new vector<Destination>(dst);
-  struct timeval tprev;
-  struct timeval tcurr;
-  gettimeofday(&tprev, NULL);
-  --tprev.tv_sec;
-
-  struct pollfd pfds;
-  memset(&pfds, 0, sizeof(pfds));
-  pfds.fd = sock;
-  pfds.events = POLLIN;
-
-  int replies_before = -1;
-  int replies_now;
-  // Send the session initialization message MAX_INITIALIZATION_RETRIES times
-  // or unil there will be no replies by two successive session initialization
-  // messages
-  for(unsigned i = 0; i < MAX_INITIALIZATION_RETRIES; ++i) {
-    replies_now = 0;
-    gettimeofday(&tprev, NULL);
-    udp_send(init_message, init_message_length, 0);
-
-    // Send the init_message and wait for the replies
-    do {
-      gettimeofday(&tcurr, NULL);
-      register unsigned time_difference =
-        (tcurr.tv_sec - tprev.tv_sec) * 1000000 + tcurr.tv_usec - tprev.tv_usec;
-      time_difference = INIT_RETRANSMISSION_RATE - time_difference;
-      if (time_difference < 0) { time_difference = 0; }
-
-      DEBUG("Time to sleep: %d\n", time_difference);
-      int poll_result;
-      if ((poll_result = poll(&pfds, 1, time_difference / 1000)) > 0) {
-        uint8_t buffer[UDP_MAX_LENGTH];
-        struct sockaddr_in client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
-        int length = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
-          (struct sockaddr*)&client_addr, &client_addr_len);
-        if (length < (int)sizeof(MulticastMessageHeader)) {
-          continue;
-        }
-
-        // TODO: do something with errors about used ports
-        MulticastMessageHeader *mih = (MulticastMessageHeader *)buffer;
-        if (mih->get_message_type() != MULTICAST_INIT_REPLY ||
-            mih->get_session_id() != session_id) {
-          DEBUG("Incorrect reply of length %d received\n", length);
-          // Silently skip the message
-          continue;
-        } else {
-          DEBUG("Received reply of length %d\n", length);
-          ++replies_now;
-          // Parse the reply message and remove the received destinations
-          uint32_t *p = (uint32_t *)(mih + 1);
-          uint32_t *end = (uint32_t* )(buffer + length);
-          // Need to store only the first address
-          bool is_address_alredy_matched = false;
-          do {
-            MulticastHostRecord *found_record;
-            MulticastHostRecord hr_p(ntohl(*p));
-#ifndef NDEBUG
-            char saddr[INET_ADDRSTRLEN];
-            DEBUG("Reply from %s\n",
-              inet_ntop(AF_INET, p, saddr, sizeof(saddr)));
-#endif
-            if ((found_record = find(hr_begin, hr_end, hr_p)) != hr_end) {
-              if (!is_address_alredy_matched) {
-                targets.push_back((*result)[found_record - hr_begin]);
-                is_address_alredy_matched = true;
-              }
-              DEBUG("Host %s connected\n", saddr);
-              // Exclude host from the message and the result
-              --hr_end;
-              swap(*found_record, *hr_end);
-              swap((*result)[found_record - hr_begin], result->back());
-              result->pop_back();
-              init_message_length -= sizeof(MulticastHostRecord);
-            }
-            ++p;
-          } while (p < end);
-          if (result->size() == 0) {
-            // All the destinations responded
-            goto finish_session_initialization;
-          }
-        }
-      } else if (poll_result == 0) {
-        // Time expired, send the next message
-        break;
-      } else {
-        ERROR("poll: %s\n", strerror(errno));
-        register_error(STATUS_UNKNOWN_ERROR, "poll error: %s", strerror(errno));
-        return NULL;
-      }
-    } while(1);
-    // Finish procedure if there were no replies for two successive
-    // retransmissions (for speed up reasons)
-    if (replies_now == 0 && replies_before == 0) {
-      break;
-    } else {
-      // TODO: correct the transmission rate using the number of replies
-      // received
-    }
-    replies_before = replies_now;
-  }
-
-finish_session_initialization:
-  // Set the new (ephemeral) port as the target port for the next messages
-  target_address.sin_port = htons(ephemeral_port);
-
-  if (send_queue != NULL) {
-    delete(send_queue);
-  }
-
-  sort(result->begin(), result->end());
-  sort(targets.begin(), targets.end());
-  send_queue = new MulticastSendQueue(targets);
-
-  return result;
-}
-
 // Routine that controls the multicast packets delivery,
 // should be started in a separate thread
 void MulticastSender::multicast_delivery_control()
@@ -239,7 +68,12 @@ void MulticastSender::multicast_delivery_control()
   while (do_work) {
     int length = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
       (struct sockaddr*)&client_addr, &client_addr_len);
-    DEBUG("Received a message of length %d\n", length);
+#ifndef NDEBUG
+    char caddr[INET_ADDRSTRLEN];
+    DEBUG("Received a message from %s (%d)\n",
+      inet_ntop(AF_INET, &client_addr.sin_addr.s_addr, caddr, sizeof(caddr)),
+      length);
+#endif
     if ((unsigned)length >= sizeof(MulticastMessageHeader)) {
       MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
       if (mmh->get_session_id() != session_id) {
@@ -262,14 +96,16 @@ void MulticastSender::multicast_delivery_control()
       switch (mmh->get_message_type()) {
         case MULTICAST_MESSAGE_RETRANS_REQUEST: {
             // TODO: somehow limit the rate of retransmissions
-            DEBUG("Retransmission request for the packet %u\n",
+#ifndef NDEBUG
+            char resp_str[INET_ADDRSTRLEN];
+            uint32_t resp_addr = htonl(mmh->get_responder());
+            DEBUG("Retransmission request from %s(%u)\n",
+              inet_ntop(AF_INET, &resp_addr, resp_str, sizeof(resp_str)),
               mmh->get_number());
-            size_t size;
-            void *message = send_queue->get_message_for_retransmission(&size,
-              mmh->get_number());
-            if (message != 0) {
-              udp_send(message, size, 0);
-            }
+#endif
+            send_queue->add_missed_packets(mmh->get_number(),
+              mmh->get_responder(), (uint32_t *)(mmh + 1),
+              (uint32_t *)(buffer + length));
             break;
           }
         case MULTICAST_RECEPTION_CONFORMATION: {
@@ -340,7 +176,6 @@ void MulticastSender::multicast_delivery_control()
           }
         default:
           DEBUG("Unexpected message type: %x\n", mmh->get_message_type());
-          // FIXME: it should not be a fatal case
           continue;
       }
     } else if (length >= 0) {
@@ -370,7 +205,10 @@ void MulticastSender::udp_send(const void *message, int size, int flags)
 {
 #ifndef NDEBUG
   char taddr[INET_ADDRSTRLEN];
-  DEBUG("send a udp message %d, %d bytes to %s:%d\n",
+  struct timeval current_time;
+  gettimeofday(&current_time, NULL);
+  DEBUG("(%u, %u) udp_send %d, %d bytes to %s:%d\n",
+    (unsigned)current_time.tv_sec, (unsigned)current_time.tv_usec,
     ((MulticastMessageHeader *)message)->get_number(),
     size, inet_ntop(AF_INET, &target_address.sin_addr, taddr, sizeof(taddr)),
     ntohs(target_address.sin_port));
@@ -463,6 +301,325 @@ void MulticastSender::send_file()
 }
 
 /*
+  This routine analyses targets, then creates and initializes
+  multicast sender for link-local targets, if it is reasonable
+  in the particular case.  If some error occurred remaining_dst
+  is set to NULL.
+*/
+MulticastSender *MulticastSender::create_and_initialize(
+    const vector<Destination>& all_destinations,
+    const vector<Destination> **remaining_dst,
+    uint32_t n_sources,
+    bool is_multicast_only,
+    Reader *reader,
+    Mode mode,
+    uint16_t multicast_port,
+    unsigned n_retransmissions)
+{
+  MulticastSender *multicast_sender = NULL;
+  *remaining_dst = NULL;
+  vector<uint32_t> local_addresses;
+  vector<uint32_t> masks;
+  // Get the local ip addresses and network masks for them
+  int temporary_sock;
+  temporary_sock = socket(PF_INET, SOCK_DGRAM, 0);
+  if (temporary_sock == -1) {
+    ERROR("Can't create a UDP socket: %s\n", strerror(errno));
+    return NULL;
+  }
+  if (get_local_addresses(temporary_sock, &local_addresses, &masks) != 0) {
+    close(temporary_sock);
+    return NULL;
+  }
+  close(temporary_sock);
+  // Figure out which interface should be used for multicast connections
+  for (unsigned i = 0; i < local_addresses.size(); ++i) {
+#ifndef NDEBUG
+    char saddr[INET_ADDRSTRLEN];
+    char smask[INET_ADDRSTRLEN];
+    uint32_t addr = htonl(local_addresses[i]);
+    uint32_t mask = htonl(masks[i]);
+    DEBUG("Address: %s (%s)\n", 
+      inet_ntop(AF_INET, &addr, saddr, sizeof(saddr)),
+      inet_ntop(AF_INET, &mask, smask, sizeof(smask)));
+#endif
+    vector<Destination> local_destinations;
+    uint32_t nonlocal_destination = INADDR_NONE;
+    for (unsigned j = 0; j < all_destinations.size(); ++j) {
+      if ((local_addresses[i] & masks[i]) ==
+          (all_destinations[j].addr & masks[i])) {
+        if (nonlocal_destination != INADDR_NONE) {
+          char dest_name[INET_ADDRSTRLEN];
+          uint32_t dest_addr = ntohl(nonlocal_destination);
+          ERROR("Destination %s is not link-local\n",
+            inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+          return NULL;
+        }
+#ifndef NDEBUG
+        char dest_name[INET_ADDRSTRLEN];
+        uint32_t dest_addr = ntohl(all_destinations[j].addr);
+        DEBUG("Destination %s is link-local\n",
+          inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+#endif
+        local_destinations.push_back(all_destinations[j]);
+      } else if (is_multicast_only) {
+        if (local_destinations.size() == 0) {
+          nonlocal_destination = all_destinations[j].addr;
+        } else {
+          char dest_name[INET_ADDRSTRLEN];
+          uint32_t dest_addr = ntohl(all_destinations[j].addr);
+          ERROR("Destination %s is not link-local\n",
+            inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+          return NULL;
+        }
+      }
+    }
+#ifdef NDEBUG
+    if (local_destinations.size() > 2 ||
+        local_destinations.size() > 0 && is_multicast_only)
+#else
+    if (local_destinations.size() > 0)
+#endif
+    {
+      multicast_sender = new MulticastSender(reader,
+        mode, multicast_port, n_sources, n_retransmissions);
+      // Establish the multicast session
+      const vector<Destination> *si_result;
+      si_result = multicast_sender->session_init(local_addresses[i],
+        local_destinations, n_sources);
+      if (si_result == NULL) {
+        // A fatal error occurred
+        delete multicast_sender;
+        return NULL;
+      } else if (si_result->size() == 0) {
+        // No connection has been established
+        delete multicast_sender;
+        continue;
+      } else {
+        // Multicast connection has been established with some hosts
+        // TODO: close the connection here if there are not many such
+        // hosts
+        vector<Destination> *new_dst = new vector<Destination>;
+        if (si_result->size() > 0) {
+          DEBUG("(%zu) hosts connected:\n",
+            si_result->size());
+          for (vector<Destination>::const_iterator i = all_destinations.begin();
+              i != all_destinations.end(); ++i) {
+            vector<Destination>::const_iterator j = lower_bound(
+              si_result->begin(), si_result->end(), *i);
+            if (j == si_result->end() || *j != *i) {
+              new_dst->push_back(*i);
+            }
+#ifndef NDEBUG
+            else {
+              char dest_name[INET_ADDRSTRLEN];
+              uint32_t dest_addr = ntohl((*i).addr);
+              DEBUG("%s\n", inet_ntop(AF_INET, &dest_addr, dest_name,
+                sizeof(dest_name)));
+            }
+#endif
+          }
+        }
+        *remaining_dst = new_dst;
+        return multicast_sender;
+      }
+    }
+  }
+  *remaining_dst = &all_destinations;
+  return NULL;
+}
+
+/*
+  This initialization routine tries to establish a multicast
+  session with the destinations specified in dst. The return value
+  is a vector of destinations the connection has been established with.
+*/
+const std::vector<Destination>* MulticastSender::session_init(
+    uint32_t local_addr, const std::vector<Destination>& dst, int n_sources)
+{
+  // Clear the previous connection targets
+  local_address = local_addr;
+  targets.clear();
+  map<uint32_t, unsigned> round_trip_times;
+  
+  // Fill up the multicast address to be used in the connection
+  memset(&target_address, 0, sizeof(target_address));
+  target_address.sin_family = AF_INET;
+  target_address.sin_addr.s_addr = address;
+  target_address.sin_port = htons(port);
+
+  sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock == -1) {
+    ERROR("Can't create a UDP socket: %s\n", strerror(errno));
+    register_error(STATUS_UNKNOWN_ERROR, "Can't create a UDP socket: %s",
+      strerror(errno));
+    return NULL;
+  }
+
+  // Choose a UDP port
+  errno = 0;
+  uint16_t ephemeral_port = choose_ephemeral_port();
+  if (ephemeral_port == 0) {
+    ERROR("Can't choose an ephemeral port: %s\n", strerror(errno));
+    register_error(STATUS_UNKNOWN_ERROR,
+      "Can't choose an ephemeral port: %s", strerror(errno));
+    return NULL;
+  }
+  DEBUG("Ephemeral port for the new connection is: %u\n", ephemeral_port);
+
+  // Compose the session initialization message
+  unsigned init_message_length = sizeof(MulticastMessageHeader) +
+    dst.size() * sizeof(MulticastHostRecord);
+  uint8_t init_message[init_message_length];
+  MulticastMessageHeader *mmh = new(init_message)
+    MulticastMessageHeader(MULTICAST_INIT_REQUEST, session_id);
+
+  MulticastHostRecord *hr = (MulticastHostRecord *)(mmh + 1);
+  MulticastHostRecord *hr_begin = hr;
+  for (uint32_t i = 0; i < dst.size(); ++i) {
+    hr->set_addr(dst[i].addr);
+    ++hr;
+  }
+  MulticastHostRecord *hr_end = hr;
+
+  // Start the session initialization procedure
+  vector<Destination> *remaining_dst = new vector<Destination>(dst);
+  struct timeval tprev;
+  struct timeval tcurr;
+  gettimeofday(&tprev, NULL);
+  --tprev.tv_sec;
+
+  struct pollfd pfds;
+  memset(&pfds, 0, sizeof(pfds));
+  pfds.fd = sock;
+  pfds.events = POLLIN;
+
+  int replies_before = -1;
+  int replies_now;
+  // Send the session initialization message MAX_INITIALIZATION_RETRIES times
+  // or unil there will be no replies by two successive session initialization
+  // messages
+  for(unsigned i = 0; i < MAX_INITIALIZATION_RETRIES; ++i) {
+    mmh->set_number(i);
+    replies_now = 0;
+    gettimeofday(&tprev, NULL);
+    udp_send(init_message, init_message_length, 0);
+
+    // Send the init_message and wait for the replies
+    do {
+      gettimeofday(&tcurr, NULL);
+      register unsigned time_difference =
+        (tcurr.tv_sec - tprev.tv_sec) * 1000000 + tcurr.tv_usec - tprev.tv_usec;
+      time_difference = INIT_RETRANSMISSION_RATE - time_difference;
+      if (time_difference < 0) { time_difference = 0; }
+
+      DEBUG("Time to sleep: %d\n", time_difference);
+      int poll_result;
+      if ((poll_result = poll(&pfds, 1, time_difference / 1000)) > 0) {
+        uint8_t buffer[UDP_MAX_LENGTH];
+        struct sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        int length = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
+          (struct sockaddr*)&client_addr, &client_addr_len);
+        if (length < (int)sizeof(MulticastMessageHeader)) {
+          continue;
+        }
+
+        // TODO: Do something in the case if the port is already in use
+        // on some destination
+        MulticastMessageHeader *mih = (MulticastMessageHeader *)buffer;
+        if (mih->get_message_type() != MULTICAST_INIT_REPLY ||
+            mih->get_session_id() != session_id) {
+          DEBUG("Incorrect reply of length %d received\n", length);
+          // Silently skip the message
+          continue;
+        } else {
+          DEBUG("Received reply of length %d\n", length);
+          ++replies_now;
+          // Parse the reply message and remove the received destinations
+          uint32_t *p = (uint32_t *)(mih + 1);
+          uint32_t *end = (uint32_t* )(buffer + length);
+          // Need to store only the first address
+          bool is_address_alredy_matched = false;
+          do {
+            MulticastHostRecord *found_record;
+            MulticastHostRecord hr_p(ntohl(*p));
+#ifndef NDEBUG
+            char saddr[INET_ADDRSTRLEN];
+            DEBUG("Reply from %s\n",
+              inet_ntop(AF_INET, p, saddr, sizeof(saddr)));
+#endif
+            if ((found_record = find(hr_begin, hr_end, hr_p)) != hr_end) {
+              if (!is_address_alredy_matched) {
+                targets.push_back((*remaining_dst)[found_record - hr_begin]);
+                // FIXME: the following equation is wrong if the retransmission
+                // rate will vary
+                struct timeval current_time;
+                gettimeofday(&current_time, NULL);
+                round_trip_times[found_record->get_addr()] =
+                  (i - mih->get_number()) * INIT_RETRANSMISSION_RATE +
+                  (current_time.tv_sec - tprev.tv_sec) * 1000000 +
+                  current_time.tv_usec - tprev.tv_usec ;
+                is_address_alredy_matched = true;
+              }
+              DEBUG("Host %s connected\n", saddr);
+              // Exclude host from the message and the remaining_dst
+              --hr_end;
+              swap(*found_record, *hr_end);
+              swap((*remaining_dst)[found_record - hr_begin],
+                remaining_dst->back());
+              remaining_dst->pop_back();
+              init_message_length -= sizeof(MulticastHostRecord);
+            }
+            ++p;
+          } while (p < end);
+          if (remaining_dst->size() == 0) {
+            // All the destinations responded
+            goto finish_session_initialization;
+          }
+        }
+      } else if (poll_result == 0) {
+        // Time expired, send the next message
+        break;
+      } else {
+        ERROR("poll: %s\n", strerror(errno));
+        register_error(STATUS_UNKNOWN_ERROR, "poll error: %s", strerror(errno));
+        return NULL;
+      }
+    } while(1);
+    // Finish procedure if there were no replies for two successive
+    // retransmissions (for speed up reasons)
+    if (replies_now == 0 && replies_before == 0) {
+      break;
+    } else {
+      // TODO: correct the transmission rate using the number of replies
+      // received
+    }
+    replies_before = replies_now;
+  }
+
+finish_session_initialization:
+  // Set the new (ephemeral) port as the target port for the next messages
+  target_address.sin_port = htons(ephemeral_port);
+
+  if (send_queue != NULL) {
+    delete(send_queue);
+  }
+
+#if 0
+  sort(remaining_dst->begin(), remaining_dst->end());
+#endif
+  sort(targets.begin(), targets.end());
+  unsigned rtts[targets.size()];
+  for (unsigned i = 0; i < targets.size(); ++i) {
+    rtts[i] = round_trip_times[targets[i].addr];
+  }
+  send_queue = new MulticastSendQueue(targets, rtts);
+
+  return &targets;
+}
+
+/*
   This is the main routine of the multicast sender. It sends
   files and directories to destinations.
 */
@@ -477,14 +634,14 @@ int MulticastSender::session()
     return -1;
   }
 
-  // Send nsources and the target paths
+  // Send n_sources and the target paths
   // Compose the destinations path messages
   uint8_t targets_message[MAX_UDP_PACKET_SIZE];
   MulticastMessageHeader *mmh =
     new(targets_message) MulticastMessageHeader(MULTICAST_TARGET_PATHS,
     session_id);
   uint32_t *nsources_p = (uint32_t *)(mmh + 1);
-  *nsources_p = htonl(nsources);
+  *nsources_p = htonl(n_sources);
   uint8_t *t_curr = (uint8_t *)(nsources_p + 1);
   uint8_t *t_end = targets_message + sizeof(targets_message);
   for (unsigned i = 0; i < targets.size(); ++i) {
@@ -553,18 +710,24 @@ int MulticastSender::session()
           next_retrans_time.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
           next_retrans_time.tv_sec += 1;
         }
-        while (send_queue->wait_for_destinations(&next_retrans_time) != 0 &&
-            retrans_number <= MAX_NUMBER_OF_TERMINATION_RETRANS) {
-          DEBUG("Retranssion %u of the MULTICAST_TERMINATION_REQUEST\n",
-            retrans_number);
+        while (retrans_number <= MAX_NUMBER_OF_TERMINATION_RETRANS) {
+          int wait_result = send_queue->wait_for_destinations(
+            &next_retrans_time);
+          if (wait_result < 0) {
+            ++retrans_number;
+          } else if (wait_result == 0) {
+            break;
+          }
           udp_send(message, size, 0);
-          ++retrans_number;
 
           gettimeofday(&current_time, NULL);
+          DEBUG("Retranssion %u of the MULTICAST_TERMINATION_REQUEST: %u, %u\n",
+            retrans_number, (unsigned)current_time.tv_sec,
+            (unsigned)current_time.tv_usec);
           TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
           max_rtt = send_queue->get_max_round_trip_time();
           if (max_rtt > 0) {
-            next_retrans_time.tv_nsec += max_rtt;
+            next_retrans_time.tv_nsec += max_rtt << 3;
           } else {
             next_retrans_time.tv_nsec += DEFAULT_TERMINATE_RETRANSMISSION_RATE;
           }
@@ -613,9 +776,8 @@ int MulticastSender::session()
 #endif
           uint8_t file_trailing[sizeof(MulticastMessageHeader) +
             sizeof(checksum()->signature)];
-          MulticastMessageHeader *mmh = 
-            new(file_trailing)MulticastMessageHeader(MULTICAST_FILE_TRAILING,
-            session_id);
+          MulticastMessageHeader *mmh = new(file_trailing)
+            MulticastMessageHeader(MULTICAST_FILE_TRAILING, session_id);
           memcpy(mmh + 1, checksum()->signature, sizeof(checksum()->signature));
           mcast_send(file_trailing, sizeof(file_trailing));
         }

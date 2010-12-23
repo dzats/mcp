@@ -32,11 +32,11 @@ void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException)
 }
 
 // Send the Unicast Session Initialization record
-void UnicastSender::send_initial_record(int nsources, char *path,
+void UnicastSender::send_initial_record(int n_sources, char *path,
     MD5sum *checksum) throw (ConnectionException)
 {
   uint32_t path_len = path == NULL ? 0 : strlen(path);
-  UnicastSessionHeader ush(flags, nsources, path_len);
+  UnicastSessionHeader ush(flags, n_sources, path_len);
   sendn(sock, &ush, sizeof(ush), 0);
   checksum->update(&ush, sizeof(ush));
   if (path_len > 0) {
@@ -150,7 +150,7 @@ uint64_t UnicastSender::write_to_socket(int sock, uint64_t size)
   session with one of the destinations.
 */
 int UnicastSender::session_init(const std::vector<Destination>& dst,
-    int nsources)
+    int n_sources)
 {
   SDEBUG("UnicastSender::session_init called\n");
   // Write the initial data of the session
@@ -165,10 +165,10 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
       MD5sum checksum;
       is_retransmission_required = false;
 #ifdef HAS_TR1_MEMORY
-      send_initial_record(nsources, dst[destination_index].filename.get(),
+      send_initial_record(n_sources, dst[destination_index].filename.get(),
         &checksum);
 #else
-      send_initial_record(nsources, dst[destination_index].filename,
+      send_initial_record(n_sources, dst[destination_index].filename,
         &checksum);
 #endif
       send_destinations(dst.begin(), dst.begin() + destination_index,
@@ -336,7 +336,7 @@ int UnicastSender::session()
             SDEBUG("Out-of-band data 1 sent\n");
             uint64_t n_bytes_delivered;
             do {
-              recvn(sock, &n_bytes_delivered, sizeof(n_bytes_delivered), 0);
+              recvn(sock, &n_bytes_delivered, sizeof(n_bytes_delivered));
               n_bytes_delivered = ntoh64(n_bytes_delivered);
             } while (n_bytes_delivered != write_result);
             // Send the trailing character OOB character
@@ -345,7 +345,7 @@ int UnicastSender::session()
             SDEBUG("Out-of-band data 2 sent\n");
             // Waiting for acknowledgement of the trailing OOB date reception
             uint8_t byte;
-            recvn(sock, &byte, sizeof(byte), 0);
+            recvn(sock, &byte, sizeof(byte));
             if (byte != 0) {
               throw ConnectionException(
                 ConnectionException::corrupted_data_received);

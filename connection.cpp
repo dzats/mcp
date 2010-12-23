@@ -8,10 +8,10 @@
 using namespace std;
 
 // Receive 'size' bytes from 'sock' and places them to 'data'
-void recvn(int sock, void *data, size_t size, int flags)
+void recvn(int sock, void *data, size_t size)
 {
   do {
-    register int bytes_recvd = recv(sock, data, size, flags);
+    register int bytes_recvd = recv(sock, data, size, 0);
     if (bytes_recvd <= 0) {
       throw ConnectionException(errno);
     } else {
@@ -29,7 +29,6 @@ void sendn(int sock, const void *data, size_t size, int flags)
     if (bytes_sent < 0) {
       if (errno == ENOBUFS) {
         SDEBUG("ENOBUFS error occurred\n");
-        usleep(200000);
         continue;
       }
 
@@ -64,14 +63,14 @@ int ReplyHeader::recv_reply(int sock, char **message, int flags)
     if ((unsigned)recv_result < sizeof(ReplyHeader)) {
       // Receive remaining part of the header
       recvn(sock, (uint8_t *)this + recv_result,
-        sizeof(ReplyHeader) - recv_result, 0);
+        sizeof(ReplyHeader) - recv_result);
     }
     if (get_msg_length() > MAX_ERROR_LENGTH) {
       throw ConnectionException(ConnectionException::corrupted_data_received);
     } else if (get_msg_length() > 0) {
       *message = (char *)malloc(get_msg_length() + 1);
       (*message)[get_msg_length()] = '\0';
-      recvn(sock, *message, get_msg_length(), 0);
+      recvn(sock, *message, get_msg_length());
       DEBUG("Received error message: %u, %x, %u, %s\n", get_status(),
         get_address(), get_msg_length(), *message);
     }
@@ -86,10 +85,9 @@ int ReplyHeader::recv_reply(int sock, char **message, int flags)
 
 // Returns internet addresses, which the host has
 // The returned value should be futher explicitly deleted.
-vector<uint32_t>* get_interfaces(int sock)
-{
+int get_local_addresses(int sock, vector<uint32_t> *addresses,
+    vector<uint32_t> *masks) {
   struct ifconf ifc;
-  vector<uint32_t> *addresses = new vector<uint32_t>;
 
   // Get the available interfaces
   int lastlen = 0;
@@ -97,8 +95,8 @@ vector<uint32_t>* get_interfaces(int sock)
   ifc.ifc_req = (struct ifreq *)malloc(ifc.ifc_len);
   while(1) {
     if (ioctl(sock, SIOCGIFCONF, &ifc) < 0) {
-      ERROR("ioctl call returned the error: %s", strerror(errno));
-      exit(EXIT_FAILURE);
+      ERROR("ioctl(SIOCGIFCONF) call returned the error: %s", strerror(errno));
+      return -1;
     }
     if (ifc.ifc_len != lastlen || lastlen == 0) {
       lastlen = ifc.ifc_len;
@@ -130,8 +128,9 @@ vector<uint32_t>* get_interfaces(int sock)
 
       // Get flags for the interface
       if (ioctl(sock, SIOCGIFFLAGS, ifr) < 0) {
-        ERROR("ioctl call returned the error: %s", strerror(errno));
-        exit(EXIT_FAILURE);
+        ERROR("ioctl(SIOCGIFFLAGS) call returned the error: %s",
+          strerror(errno));
+        return -1;
       }
       if ((ifr->ifr_flags & IFF_UP) == 0 ||
           (ifr->ifr_flags & IFF_LOOPBACK) != 0) {
@@ -144,8 +143,20 @@ vector<uint32_t>* get_interfaces(int sock)
         inet_ntop(AF_INET, &addr, iaddr, sizeof(iaddr)));
 #endif
       addresses->push_back(ntohl(addr));
+      if (masks != NULL) {
+        // Get network mask for the interface
+        if (ioctl(sock, SIOCGIFNETMASK, ifr) < 0) {
+          ERROR("Can't get network mask for the interface %s: %s",
+            ifr->ifr_name, strerror(errno));
+          return -1;
+        }
+        uint32_t addr = ((struct sockaddr_in *)&ifr->ifr_addr)->sin_addr.s_addr;
+        DEBUG("Network mask: %s\n", 
+          inet_ntop(AF_INET, &addr, iaddr, sizeof(iaddr)));
+        masks->push_back(ntohl(addr));
+      }
     }
   }
   free(ifc.ifc_req);
-  return addresses;
+  return 0;
 }

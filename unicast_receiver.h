@@ -20,7 +20,7 @@ class UnicastReceiver : public Reader
 public:
   std::vector<Destination> destinations;
   uint32_t flags;
-  int nsources;
+  int n_sources;
   char *path;
   uint32_t local_address;
   PathType path_type;

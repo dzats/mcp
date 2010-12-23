@@ -88,15 +88,15 @@ struct UnicastSessionHeader
 {
 private:
   uint32_t flags; // configuration flags (currrently unused)
-  uint32_t nsources; // temporary unused field
+  uint32_t n_sources; // temporary unused field
   uint32_t path_length; // length of the target path
 public:
   UnicastSessionHeader() {}
-  UnicastSessionHeader(uint32_t flags, uint32_t nsources,
+  UnicastSessionHeader(uint32_t flags, uint32_t n_sources,
       uint32_t path_length)
   {
     this->flags = htonl(flags);
-    this->nsources = htonl(nsources);
+    this->n_sources = htonl(n_sources);
     this->path_length = htonl(path_length);
   }
 
@@ -106,7 +106,7 @@ public:
   }
   uint32_t get_nsources()
   {
-    return ntohl(nsources);
+    return ntohl(n_sources);
   }
   uint32_t get_path_length()
   {
@@ -362,7 +362,7 @@ public:
 };
 
 // Receive 'size' bytes from 'sock' and places them to 'data'
-void recvn(int sock, void *data, size_t size, int flags);
+void recvn(int sock, void *data, size_t size);
 
 // Send 'size' bytes from 'data' to 'sock'
 void sendn(int sock, const void *data, size_t size, int flags);
@@ -372,5 +372,7 @@ void send_incorrect_checksum(int sock, uint32_t addr);
 
 // Returns internet addresses, which the host has
 // The returned value should be futher explicitly deleted.
-std::vector<uint32_t>* get_interfaces(int sock);
+int get_local_addresses(int sock, std::vector<uint32_t> *addresses,
+  std::vector<uint32_t> *masks);
+
 #endif

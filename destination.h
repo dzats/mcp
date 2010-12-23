@@ -30,9 +30,13 @@ struct Destination
     }
     return *this;
   }
-  bool operator<(const Destination& arg) const
+  bool operator<(const Destination& second) const
   {
-    return addr < arg.addr;
+    return addr < second.addr;
+  }
+  bool operator!=(const Destination& second) const
+  {
+    return addr != second.addr;
   }
 };
 #endif

@@ -10,10 +10,10 @@ using namespace std;
 #define INT32_MAX 0x7fffffff
 #endif
 
-MulticastSendQueue::MulticastSendQueue(
-    const std::vector<Destination> targets) : store_position(0),
-    first_unacknowledged_packet(0), unacknowledged_data(0),
-    window_size(INITIAL_WINDOW_SIZE), ssthresh(UINT_MAX)
+MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
+    unsigned *rtts) : store_position(0), data_on_flow(0),
+    window_size(INITIAL_WINDOW_SIZE),
+    ssthresh(UINT_MAX), is_queue_full(false)
 {
   n_destinations = targets.size();
   buffer = std::deque<MessageRecord*>(max(n_destinations * DEFAULT_BUFFER_SCALE,
@@ -23,17 +23,24 @@ MulticastSendQueue::MulticastSendQueue(
   }
   target_addresses = new uint32_t[n_destinations];
   round_trip_times = new unsigned[n_destinations];
+  max_round_trip_time = 0;
   for (unsigned i = 0; i < n_destinations; ++i) {
     target_addresses[i] = targets[i].addr;
-    round_trip_times[i] = 0;
+    round_trip_times[i] = rtts[i];
+    if (max_round_trip_time < rtts[i]) {
+      max_round_trip_time = rtts[i];
+    }
   }
+  
   first_to_acknowledge = new unsigned[n_destinations];
   memset(first_to_acknowledge, 0, sizeof(unsigned) * n_destinations);
   termination_message = NULL;
+
+  gettimeofday(&last_data_on_flow_evaluation, NULL);
     
-  pthread_mutex_init(&_mutex, NULL);
+  pthread_mutex_init(&mutex, NULL);
   pthread_cond_init(&space_ready_cond, NULL);
-  pthread_cond_init(&_transmission_finished_cond, NULL);
+  pthread_cond_init(&transmission_finished_cond, NULL);
 }
 
 MulticastSendQueue::~MulticastSendQueue()
@@ -43,13 +50,41 @@ MulticastSendQueue::~MulticastSendQueue()
   }
   delete first_to_acknowledge;
   delete target_addresses;
+  delete round_trip_times;
   if (termination_message != NULL) {
     delete termination_message;
   }
 
-  pthread_mutex_destroy(&_mutex);
+  pthread_mutex_destroy(&mutex);
   pthread_cond_destroy(&space_ready_cond);
-  pthread_cond_destroy(&_transmission_finished_cond);
+  pthread_cond_destroy(&transmission_finished_cond);
+}
+
+// Wait for free space in the buffer
+int MulticastSendQueue::wait_for_space(unsigned timeout) {
+  struct timeval current_time;
+  struct timespec till_time;
+  gettimeofday(&current_time, NULL);
+  TIMEVAL_TO_TIMESPEC(&current_time, &till_time);
+  till_time.tv_sec += timeout / 1000000;
+  till_time.tv_nsec += (timeout % 1000000) * 1000;
+  if (till_time.tv_nsec > 1000000000) {
+    till_time.tv_nsec -= 1000000000;
+    till_time.tv_sec += 1;
+  }
+  is_queue_full = true;
+  int wait_result = pthread_cond_timedwait(&space_ready_cond,
+    &mutex, &till_time);
+  is_queue_full = false;
+  if (wait_result == 0) {
+    // Some reply received and space've been freed
+    return 0;
+  } else {
+    assert(wait_result == ETIMEDOUT);
+    // Timeout expired
+    SDEBUG("Timeout expired\n");
+    return ETIMEDOUT;
+  }
 }
 
 // Add message to the queue
@@ -58,104 +93,155 @@ void* MulticastSendQueue::store_message(const void *message, size_t size,
 {
   assert(size <= MAX_UDP_PACKET_SIZE);
   struct timeval current_time;
-  pthread_mutex_lock(&_mutex);
-  unacknowledged_data += size;
+  pthread_mutex_lock(&mutex);
+  DEBUG("missed: %zu, max_rtt: %u\n", missed_packets.size(),
+    max_round_trip_time);
 
-  if (unacknowledged_data > window_size) {
-    // Window is filled, wait for acknowledgements
-    while(unacknowledged_data > window_size) {
-      // Get the time when the first unacknowledged message has been send
-      unsigned i = first_unacknowledged_packet;
-      unsigned number;
-      uint32_t responder = INADDR_NONE;
-      for (; i < store_position; ++i) {
-        responder =
-          ((MulticastMessageHeader *)buffer[i]->message)->get_responder();
-  
-        if (responder != INADDR_NONE && buffer[i]->timestamp.tv_sec > 0) {
-          current_time = buffer[i]->timestamp;
-          number = ((MulticastMessageHeader *)buffer[i]->message)->get_number();
-          break;
-        }
-      }
-      if (i == store_position) {
-        // There are no message in the queue for which there were no
-        // retransmissions. Initializa timeout from the currect time
-        // and retransmit the last message if the timeout expired.
-        gettimeofday(&current_time, NULL);
-        number = ((MulticastMessageHeader *)buffer[store_position -
-          1]->message)->get_number();
-        --i;
-      }
-      
-#if 0
-      DEBUG("max_round_trip_time: %d\n", max_round_trip_time);
-#endif
-      // Calculate time when the next retransmission should take place
-      uint32_t *t = lower_bound(target_addresses,
-        target_addresses + n_destinations, responder);
-      if (responder != INADDR_NONE &&
-          round_trip_times[t - target_addresses] > 0) {
-        current_time.tv_usec += round_trip_times[t - target_addresses];
-#if 0
-      } else if (max_round_trip_time > 0) {
-        current_time.tv_usec += max_round_trip_time;
-#endif
-      } else {
-        current_time.tv_usec += DEFAULT_ROUND_TRIP_TIME;
-      }
-      if (current_time.tv_usec >= 1000000) {
-        current_time.tv_sec += current_time.tv_usec / 1000000;
-        current_time.tv_usec %= 1000000;
-      }
-  
-      struct timespec wait_till_time;
-      TIMEVAL_TO_TIMESPEC(&current_time, &wait_till_time);
-  
-      int error = pthread_cond_timedwait(&space_ready_cond, &_mutex,
-        &wait_till_time);
-      if (error != 0) {
-        if (error != ETIMEDOUT) {
-          ERROR("pthread_cond_timedwait error: %s\n", strerror(error));
-          abort();
-        } else {
-          SDEBUG("pthread_cond_timedwait timeout expired\n");
-          if (i < store_position &&
-              ((MulticastMessageHeader *)buffer[i]->message)->get_number() == number) {
-            // Retransmission for some packet required
-            unacknowledged_data -= size;
-            void *result = buffer[i]->message;
-            *retrans_message_size = buffer[i]->size;
-            buffer[i]->timestamp = (struct timeval) {0, 0};
-            pthread_mutex_unlock(&_mutex);
-            return result;
-          } else {
-            // Some acknowledgements have been received, we should
-            // restart the procedure (wait for round trip time for some other
-            // packet)
-            continue;
-          }
-        }
-      }
-      SDEBUG("Space ready signal received\n");
+  void *message_for_retransmission = NULL;
+  while (missed_packets.size() > 0) {
+    // Some packets have been missed
+    unsigned number = *missed_packets.begin();
+    missed_packets.erase(missed_packets.begin());
+
+    unsigned offset = number -
+      ((MulticastMessageHeader *)buffer[0]->message)->get_number();
+    DEBUG("error offset: %d\n", offset);
+
+    if (offset < store_position) {
+      message_for_retransmission = buffer[offset]->message;
+      *retrans_message_size = buffer[offset]->size;
+      buffer[offset]->timestamp = (struct timeval) {0, 0};
       break;
+    } else {
+      DEBUG("Retransmission request for %u is outdated\n", number);
     }
   }
 
-  if (store_position == buffer.size()) {
-    // Increase the buffer size instead
-    buffer.push_back(new MessageRecord);
-    SDEBUG("Increase the multicast send buffer\n");
+  if (message_for_retransmission == NULL &&
+      store_position > n_destinations * 2 + (window_size >> 9) + 7) {
+    /*
+      The previlus rude expression means n_destinations * 2 + channel capacity.
+      Buffers is filled, perform retransmission for the first unacknowledged
+      message, that has not been retransmitted yet, or for the first
+      unacknowledged message if there were retransmissions for all
+      the messages in the buffer. TODO: In the latter case delay the
+      retransmission by max_round_trip_time * 2
+    */
+    unsigned min_unaknowledged = UINT_MAX;
+    unsigned i = 0;
+    bool is_message_for_retransmission_choosen = false;
+    for (; i < store_position; ++i) {
+      MulticastMessageHeader *mmh =
+          (MulticastMessageHeader *)buffer[i]->message;
+      if (mmh->get_responder() != INADDR_NONE) {
+        uint32_t *t = lower_bound(target_addresses,
+          target_addresses + n_destinations, mmh->get_responder());
+        if (t != target_addresses + n_destinations &&
+            *t == mmh->get_responder() &&
+            first_to_acknowledge[t - target_addresses] <= i) {
+          if (buffer[i]->timestamp.tv_sec > 0) {
+            // The next search should start with the next position
+            *retrans_message_size = buffer[i]->size;
+            message_for_retransmission = buffer[i]->message;
+            is_message_for_retransmission_choosen = true;
+            gettimeofday(&current_time, NULL);
+            unsigned timeout = (round_trip_times[t - target_addresses] << 1) -
+              ((current_time.tv_sec - buffer[i]->timestamp.tv_sec) * 1000000 +
+              current_time.tv_usec - buffer[i]->timestamp.tv_usec);
+            if (timeout < INT_MAX) {
+              if (wait_for_space(timeout) == 0) {
+                // Space has been freed
+                message_for_retransmission = NULL;
+              } else {
+                // Timeout expired
+              }
+            }
+            buffer[i]->timestamp = (struct timeval) {0, 0};
+            break;
+          } else {
+            if (min_unaknowledged == UINT_MAX) {
+              min_unaknowledged = i;
+            }
+          }
+        }
+      }
+    }
+    if (!is_message_for_retransmission_choosen) {
+      SDEBUG("At least one retransmission performed for all packets\n");
+      assert(min_unaknowledged != UINT_MAX);
+      *retrans_message_size = buffer[min_unaknowledged]->size;
+      message_for_retransmission = buffer[min_unaknowledged]->message;
+
+      // Delay retransmission for MAX_RTT
+      if (wait_for_space(max_round_trip_time) == 0) {
+        // Space has been freed
+        message_for_retransmission = NULL;
+      } else {
+        // Timeout expired
+      }
+    }
   }
 
-  // Put message into the buffer
+  // Rate control code
+  // Adjust amount of data that is currently on flow
   gettimeofday(&current_time, NULL);
-  buffer[store_position]->size = size;
-  buffer[store_position]->timestamp = current_time;
-  memcpy(buffer[store_position]->message, message, size);
-  ++store_position;
-  pthread_mutex_unlock(&_mutex);
-  return NULL;
+  // FIXME: Be careful to avoid overflows
+  unsigned data_delivered = ((uint64_t)window_size *
+    ((current_time.tv_sec - last_data_on_flow_evaluation.tv_sec) * 1000000 +
+    current_time.tv_usec - last_data_on_flow_evaluation.tv_usec)) /
+    max_round_trip_time;
+  if (data_delivered > data_on_flow) {
+    data_delivered = data_on_flow;
+  }
+  // Some limitation to avoid unlimited grouth of window_size
+  if (data_on_flow * 2 > window_size) {
+    // Change the window size
+    if (ssthresh == UINT_MAX) {
+      // Slow start
+      window_size += data_delivered;
+    } else {
+      // Congestion avoidance
+      window_size += (MAX_UDP_PACKET_SIZE * data_delivered) / window_size;
+    }
+    DEBUG("New window size is %u (%u/%u)\n", window_size, data_delivered,
+      data_on_flow);
+  }
+  last_data_on_flow_evaluation = current_time;
+  data_on_flow -= data_delivered;
+  
+  if (message_for_retransmission == NULL) {
+    data_on_flow += size;
+  } else {
+    data_on_flow += *retrans_message_size;
+  }
+  if (data_on_flow > window_size) {
+    // Delay the packet to avoid congestion
+    // FIXME: Be careful to avoid overflow in the following expression
+    useconds_t delay = max_round_trip_time *
+      (((data_on_flow - window_size) << 12) / window_size) >> 12;
+    // FIXME: Check whether this kind of protection is really required
+    if (delay > 1000000) {
+      delay = 1000000;
+    }
+    usleep(delay);
+  }
+
+  if (message_for_retransmission == NULL) {
+    if (store_position == buffer.size()) {
+      // Increase the buffer size instead
+      buffer.push_back(new MessageRecord);
+      SDEBUG("Increase the multicast send buffer\n");
+    }
+
+    // Put message into the buffer
+    gettimeofday(&current_time, NULL);
+    buffer[store_position]->size = size;
+    buffer[store_position]->timestamp = current_time;
+    memcpy(buffer[store_position]->message, message, size);
+    ++store_position;
+  }
+  pthread_mutex_unlock(&mutex);
+  return message_for_retransmission;
 }
 
 // Acknowledge receiving all the messages till 'number' by 'destination'
@@ -164,25 +250,21 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
 {
   struct timeval current_time;
   gettimeofday(&current_time, NULL);
-  pthread_mutex_lock(&_mutex);
-  DEBUG("MulticastSendQueue::acknowledge (%u, %d) (%u, %u, %zu)\n", 
-    number, destination, store_position, first_unacknowledged_packet,
-    buffer.size());
+  pthread_mutex_lock(&mutex);
+  DEBUG("MulticastSendQueue::acknowledge (%u, %d) (%u, %zu)\n", 
+    number, destination, store_position, buffer.size());
 
   unsigned offset = number -
     ((MulticastMessageHeader *)buffer[0]->message)->get_number();
   DEBUG("offset: %d\n", offset);
 
-  // greater instead of greater or equal here for correct session
-  // termination conformation processing
   if (offset >= store_position) {
     // Ignore this conformation
     DEBUG("Ignore retransmitted conformation %u from %u\n",
       number, destination);
-    pthread_mutex_unlock(&_mutex);
+    pthread_mutex_unlock(&mutex);
     return 0;
   }
-  assert(offset < store_position);
   first_to_acknowledge[destination] = offset + 1;
 
   // Update the Round-Trip Time information, if there were no
@@ -194,19 +276,15 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
       (current_time.tv_sec - buffer[offset]->timestamp.tv_sec) * 1000000 +
       current_time.tv_usec - buffer[offset]->timestamp.tv_usec;
     DEBUG("Received round trip time: %d\n", received_rtt);
-#if 0
     unsigned previous_rtt = round_trip_times[destination];
-#endif
     round_trip_times[destination] = received_rtt + (received_rtt >> 1);
 
-#if 0
     if (max_round_trip_time < round_trip_times[destination]) {
       max_round_trip_time = round_trip_times[destination];
     } else if (max_round_trip_time == previous_rtt) {
       max_round_trip_time = *max_element(round_trip_times,
         round_trip_times + n_destinations);
     }
-#endif
   }
 
   if (termination_message != 0 &&
@@ -224,59 +302,78 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     }
   }
 
-  if (offset >= first_unacknowledged_packet) {
-    unsigned acknowledged_data = 0; // only by one of the destinations
-    for (unsigned i = first_unacknowledged_packet; i <= offset; ++i) {
-      acknowledged_data += buffer[i]->size;
-    }
-
-    unsigned old_window_size = window_size;
-    // Change the window size
-    if (ssthresh == UINT_MAX) {
-      // Slow start + additional limitation on window size
-      if (unacknowledged_data * 2 > window_size) {
-        window_size += acknowledged_data;
-      }
-    } else {
-      // Conjenction avoidance + additional limitation on window size
-      if (unacknowledged_data * 2 > window_size) {
-        window_size += acknowledged_data * MAX_UDP_PACKET_SIZE / window_size;
-      }
-    }
-
-    DEBUG("New window size is %u (%u)\n", window_size, unacknowledged_data);
-
-    if (unacknowledged_data > old_window_size &&
-        unacknowledged_data - acknowledged_data <= window_size) {
-      SDEBUG("Wake up the multicast sender\n");
-      assert(pthread_cond_signal(&space_ready_cond) == 0);
-    }
-    unacknowledged_data -= acknowledged_data;
-    first_unacknowledged_packet = offset + 1;
-  }
-
   unsigned min_to_acknowledge =
     *min_element(first_to_acknowledge, first_to_acknowledge + n_destinations);
   if (min_to_acknowledge > 0) {
     for (unsigned i = 0; i < n_destinations; ++i) {
       first_to_acknowledge[i] -= min_to_acknowledge;
+      assert(first_to_acknowledge[i] < INT_MAX);
     }
     // Move all the acknowledged elements to the queue's tail
     buffer.insert(buffer.end(), buffer.begin(),
       buffer.begin() + min_to_acknowledge);
     buffer.erase(buffer.begin(), buffer.begin() + min_to_acknowledge);
     store_position -= min_to_acknowledge;
-    first_unacknowledged_packet -= min_to_acknowledge;
+    assert(store_position < INT_MAX);
+    if (is_queue_full) {
+       SDEBUG("Wake up the sender\n");
+       pthread_cond_signal(&space_ready_cond);
+    }
   }
 
-  if (termination_message != NULL && store_position == 0) {
-    SDEBUG("Multicast transmission finished\n");
-    pthread_cond_signal(&_transmission_finished_cond);
-    pthread_mutex_unlock(&_mutex);
-    return 1;
+  if (termination_message != NULL) {
+    if (store_position == 0) {
+      SDEBUG("Multicast transmission finished\n");
+      pthread_cond_signal(&transmission_finished_cond);
+      pthread_mutex_unlock(&mutex);
+      return 1;
+    } else {
+      is_some_destinations_replied = true;
+    }
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   return 0;
+}
+
+// Function registers that some of the packets has been missed
+void MulticastSendQueue::add_missed_packets(uint32_t number,
+    uint32_t destination, uint32_t *numbers, uint32_t *end)
+{
+  end -= 2;
+  DEBUG("add_missed_packets: %p, %p\n", numbers, end);
+  pthread_mutex_lock(&mutex);
+  while (numbers <= end) {
+    uint32_t i = ntohl(*numbers);
+    ++numbers;
+    for (; i <= ntohl(*numbers); ++i) {
+#ifndef NDEBUG
+      uint32_t dest_addr = htonl(destination);
+      char dest_name[INET_ADDRSTRLEN];
+      DEBUG("Packet %d has not been delivered to %s\n", i,
+        inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+#endif
+      missed_packets.insert(i);
+    }
+    ++numbers;
+  }
+  is_some_destinations_replied = true;
+  unsigned offset = number -
+    ((MulticastMessageHeader *)buffer.front()->message)->get_number();
+  DEBUG("offset: %u, first: %u, number: %u\n", offset,
+    ((MulticastMessageHeader *)buffer.front()->message)->get_number(),
+    number);
+  assert(offset < buffer.size());
+  if (offset >= buffer.size()) {
+    DEBUG("Incorrect message number: %u (%u)\n", number, offset);
+    return;
+  }
+
+  // FIXME: Check whether the algorithm is acceptable
+  buffer[offset]->timestamp = (struct timeval){0, 0};
+  ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
+  window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
+  DEBUG("New window size: %u\n", window_size);
+  pthread_mutex_unlock(&mutex);
 }
 
 // Compose the session termination message and return it to the caller
@@ -301,14 +398,16 @@ void *MulticastSendQueue::prepare_termination(size_t *size,
 }
 
 // Waits for the transmission termination. Returns 0 if all the
-// destinations have finished and -1 otherwise
-int MulticastSendQueue::wait_for_destinations(const struct timespec *timeout)
+// destinations have finished, 1 if some of the destinations
+// have send replies and -1 otherwise
+int MulticastSendQueue::wait_for_destinations(const struct timespec *till_time)
 {
-  pthread_mutex_lock(&_mutex);
+  pthread_mutex_lock(&mutex);
+  is_some_destinations_replied = false;
   if (store_position != 0) {
     SDEBUG("Wait for the replies from destinations\n");
-    int error = pthread_cond_timedwait(&_transmission_finished_cond, &_mutex,
-      timeout);
+    int error = pthread_cond_timedwait(&transmission_finished_cond, &mutex,
+      till_time);
     if (error != 0) {
       if (error != ETIMEDOUT) {
         ERROR("pthread_cond_timedwait error: %s\n", strerror(error));
@@ -316,73 +415,16 @@ int MulticastSendQueue::wait_for_destinations(const struct timespec *timeout)
       } else {
         SDEBUG("pthread_cond_timedwait timeout expired\n");
       }
-      pthread_mutex_unlock(&_mutex);
-      return -1;
+      pthread_mutex_unlock(&mutex);
+      if (is_some_destinations_replied) {
+        return 1;
+      } else {
+        return -1;
+      }
     }
     // Transmission is done
   }
-  pthread_mutex_unlock(&_mutex);
+  pthread_mutex_unlock(&mutex);
   return 0;
 }
 
-// Get message with the number 'number' and set timestamp for this message
-// to 0 (can be called only by the thread controlling the message delivery)
-void* MulticastSendQueue::get_message_for_retransmission(size_t *size,
-    uint32_t number)
-{
-  pthread_mutex_lock(&_mutex);
-  unsigned offset = number -
-    ((MulticastMessageHeader *)buffer.front()->message)->get_number();
-  DEBUG("offset: %u, first: %u, number: %u\n", offset,
-    ((MulticastMessageHeader *)buffer.front()->message)->get_number(),
-    number);
-  if (offset >= buffer.size()) {
-    return NULL;
-  }
-  register void *message = buffer[offset]->message;
-  *size = buffer[offset]->size;
-  buffer[offset]->timestamp = (struct timeval){0, 0};
-  ssthresh = max(unacknowledged_data / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
-  // May be excessive condition
-  DEBUG("Unacknowledged data: %u (%u)\n", unacknowledged_data, window_size);
-  if (unacknowledged_data > window_size &&
-      unacknowledged_data <= ssthresh + MAX_UDP_PACKET_SIZE * 3) {
-    pthread_cond_signal(&space_ready_cond);
-  }
-
-  window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
-  DEBUG("Packet %u lost, new window size: %u\n", number, window_size);
-  pthread_mutex_unlock(&_mutex);
-  return message;
-}
-
-#if 0
-// Get the first message (starting from 'from_position' in the queue) that
-// has not been acknowledged. Returns NULL if there is no such message
-void* MulticastSendQueue::get_unacknowledged_message(size_t *size,
-    unsigned *from_number)
-{
-  pthread_mutex_lock(&_mutex);
-  for (unsigned i = *from_position; i < store_position; ++i) {
-    MulticastMessageHeader *mmh =
-      ((MulticastMessageHeader *)buffer[i]->message);
-    if (mmh->get_responder() != INADDR_NONE) {
-      uint32_t *t = lower_bound(target_addresses,
-        target_addresses + n_destinations, mmh->get_responder());
-      if (t != target_addresses + n_destinations &&
-          *t == mmh->get_responder() &&
-          first_to_acknowledge[t - target_addresses] <= i) {
-        *size = buffer[i]->size;
-        register void *message = buffer[i]->message;
-        pthread_mutex_unlock(&_mutex);
-        // The next search should start whith the next position
-        *from_position = i + 1;
-        return message;
-      }
-    }
-  }
-  pthread_mutex_unlock(&_mutex);
-  *from_position = 0;
-  return NULL;
-}
-#endif

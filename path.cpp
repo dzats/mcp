@@ -97,7 +97,7 @@ void free_targetdir_name(const char *dirname,
 
 // Detect the type of the 'path'. If this function returns path_is_invalid
 // 'error' points to the corresponding error message
-PathType get_path_type(const char *path, char **error, unsigned nsources)
+PathType get_path_type(const char *path, char **error, unsigned n_sources)
 {
   assert(error != NULL);
   size_t path_len = strlen(path);
@@ -112,7 +112,7 @@ PathType get_path_type(const char *path, char **error, unsigned nsources)
       if (S_ISDIR(s.st_mode)) {
         return path_is_directory;
       } else if (S_ISREG(s.st_mode)) {
-        if (nsources > 1) {
+        if (n_sources > 1) {
           *error = strdup("Multiple sources specified, the path can't be a "
             "file");
           return path_is_invalid;
@@ -125,7 +125,7 @@ PathType get_path_type(const char *path, char **error, unsigned nsources)
         return path_is_invalid;
       }
     } else if(errno == ENOENT) {
-      if (nsources > 1) {
+      if (n_sources > 1) {
         // Create the directory with the name 'path'
         if (mkdir(path, S_IRWXU | S_IRGRP | S_IXGRP |
             S_IROTH | S_IXOTH) != 0) {

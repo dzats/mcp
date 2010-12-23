@@ -129,9 +129,9 @@ int UnicastReceiver::get_initial(MD5sum *checksum) throw (ConnectionException)
 {
   // Get the number of sources
   UnicastSessionHeader ush;
-  recvn(sock, &ush, sizeof(ush), 0);
+  recvn(sock, &ush, sizeof(ush));
   checksum->update(&ush, sizeof(ush));
-  nsources = ush.get_nsources();
+  n_sources = ush.get_nsources();
   flags = ush.get_flags();
   register int path_len = ush.get_path_length();
 
@@ -139,20 +139,20 @@ int UnicastReceiver::get_initial(MD5sum *checksum) throw (ConnectionException)
     throw ConnectionException(ConnectionException::corrupted_data_received);
   }
 
-  DEBUG("number of sources: %d, path length: %d\n", nsources, path_len);
+  DEBUG("number of sources: %d, path length: %d\n", n_sources, path_len);
   if (path != NULL) {
     free(path);
   }
   path = (char *)malloc(path_len + 1);
   path[path_len] = 0;
   if (path_len > 0) {
-    recvn(sock, path, path_len, 0);
+    recvn(sock, path, path_len);
     checksum->update(path, path_len);
     DEBUG("destination: %s\n", path);
   }
 
   char *error;
-  path_type = get_path_type(path, &error, nsources);
+  path_type = get_path_type(path, &error, n_sources);
   if (path_type == path_is_invalid) {
     register_error(STATUS_FATAL_DISK_ERROR, error);
     free(error);
@@ -168,7 +168,7 @@ void UnicastReceiver::get_destinations(MD5sum *checksum)
   uint32_t record_header[2]; // addr, name len
   destinations.clear();
   while(1) {
-    recvn(sock, record_header, sizeof(record_header), 0);
+    recvn(sock, record_header, sizeof(record_header));
     checksum->update(record_header, sizeof(record_header));
     // FIXME: rewrite using the DestinationHeader structure
     record_header[0] = ntohl(record_header[0]);
@@ -183,7 +183,7 @@ void UnicastReceiver::get_destinations(MD5sum *checksum)
       location[record_header[1]] = 0;
       if (record_header[1] > 0) {
         // Get the server's address
-        recvn(sock, location, record_header[1], 0);
+        recvn(sock, location, record_header[1]);
         checksum->update(location, record_header[1]);
       }
       // Get the destinations' list. Possibly memory leak here, check this
@@ -242,7 +242,7 @@ int UnicastReceiver::session_init(int s)
       printf("\n");
 #endif
       uint8_t received_checksum[sizeof(checksum.signature)];
-      recvn(sock, received_checksum, sizeof(received_checksum), 0);
+      recvn(sock, received_checksum, sizeof(received_checksum));
 #ifndef NDEBUG
       SDEBUG("Received checksum:   ");
       MD5sum::display_signature(stdout, received_checksum);
@@ -279,7 +279,7 @@ int UnicastReceiver::session()
   while (1) {
     FileInfoHeader finfo;
     try {
-      recvn(sock, &finfo, sizeof(finfo), 0);
+      recvn(sock, &finfo, sizeof(finfo));
       if (finfo.is_trailing_record()) {
         SDEBUG("End of the transmission\n");
         if (finish_work() >= STATUS_FIRST_FATAL_ERROR) {
@@ -297,7 +297,7 @@ int UnicastReceiver::session()
   
       // Read the file name
       char fname[finfo.get_name_length() + 1];
-      recvn(sock, fname, finfo.get_name_length(), 0);
+      recvn(sock, fname, finfo.get_name_length());
       fname[finfo.get_name_length()] = 0;
   
       if (finfo.get_type() == resource_is_a_file) {
@@ -315,7 +315,7 @@ int UnicastReceiver::session()
           // All ok, get checksum for the received file and check it
           uint8_t signature[sizeof(checksum.signature)];
   
-          recvn(sock, signature, sizeof(signature), 0);
+          recvn(sock, signature, sizeof(signature));
 #ifndef NDEBUG
           DEBUG("Received checksum(%u): ", (unsigned)sizeof(signature));
           MD5sum::display_signature(stdout, signature);

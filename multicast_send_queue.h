@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include <queue>
+#include <set>
 #include <algorithm>
 
 #include "connection.h"
@@ -24,11 +25,12 @@ class MulticastSendQueue
   static const unsigned INITIAL_WINDOW_SIZE = MAX_UDP_PACKET_SIZE * 3;
   std::deque<MessageRecord*> buffer; // dequeue of the message number to
     // the message content
-  unsigned store_position;
-  unsigned first_unacknowledged_packet; // offset of the first packet,
-    // that has not been acknowledged by any destination
-  unsigned unacknowledged_data; // data (in bytes) in the buffer, which has
-    // not been acknowledged by any destination
+  unsigned store_position; // first free position in the buffer
+
+  unsigned data_on_flow; // data that is expected to be somewhere
+    // inside the channel
+  struct timeval last_data_on_flow_evaluation; // timestamp when the last
+    // packet has been sent
 
   unsigned n_destinations;
   unsigned *first_to_acknowledge; // Array of the offsets of the first
@@ -36,22 +38,30 @@ class MulticastSendQueue
   // is the destination number
   uint32_t *target_addresses; // IP addresses of the destinations
   unsigned *round_trip_times; // Round trip timesin microseconds
+  unsigned max_round_trip_time; // Maximum round trip time in microseconds
 
   unsigned window_size; // data window size (something like the TCP's cwnd)
 
   unsigned ssthresh; // Slow start threshold, is not very
     // required here (see RFC 2581)
 
+  std::set<uint32_t> missed_packets; // Packets that has been missed on some of
+    // the destinations
+
+  volatile bool is_queue_full;
+
   // Session termination message
   uint8_t *termination_message;
   size_t termination_message_size;
+  bool is_some_destinations_replied; // Whether some of the destinations
+    // replied somehow to the session termination request message
 
-  pthread_mutex_t _mutex;
+  pthread_mutex_t mutex;
   pthread_cond_t space_ready_cond;
-  pthread_cond_t _transmission_finished_cond;
+  pthread_cond_t transmission_finished_cond;
 
 public:
-  MulticastSendQueue(const std::vector<Destination> targets);
+  MulticastSendQueue(const std::vector<Destination> targets, unsigned *rtts);
   ~MulticastSendQueue();
 
   unsigned get_window_size() const { return window_size; }
@@ -60,6 +70,9 @@ public:
     return *std::max_element(round_trip_times,
       round_trip_times + n_destinations);
   }
+
+  // Wait for free space in the buffer
+  int wait_for_space(unsigned timeout);
 
   // Add message to the queue. Returns NULL on success and message
   // that should be retransmitted if the sending window is full
@@ -74,23 +87,8 @@ public:
   // hosts there were no final replies from.
   int wait_for_destinations(const struct timespec *timeout);
 
-  // Get message with the number 'number' and set timestamp for this message
-  // to 0 (can be called only by the thread controlling the message delivery)
-  void *get_message_for_retransmission(size_t *size, uint32_t number);
-
-#if 0
-  // Get the first message (starting from 'from_position' in the queue) that
-  // has not been acknowledged. Returns NULL if there is no such message
-  void* get_unacknowledged_message(size_t *size, unsigned *from_position);
-
-  void lock_queue()
-  {
-    pthread_mutex_lock(&_mutex);
-  }
-  void release_queue()
-  {
-    pthread_mutex_unlock(&_mutex);
-  }
-#endif
+  // Function registers that some of the packets has been missed
+  void add_missed_packets(uint32_t number, uint32_t destination,
+    uint32_t *numbers, uint32_t *end);
 };
 #endif

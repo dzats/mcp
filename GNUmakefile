@@ -24,8 +24,7 @@ connection.o
 
 DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d)
 
-#CXXFLAGS += -ggdb -Wall
-CXXFLAGS += -DNDEBUG -O2 -ggdb
+CXXFLAGS += -ggdb -Wall -DNDEBUG
 
 PROGRAMS = mcp mcpd
 

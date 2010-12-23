@@ -33,30 +33,16 @@
 
 using namespace std;
 
-// Get next value for the message retransmission timeout
-unsigned MulticastReceiver::get_packet_retrans_timeout(unsigned prev_timeout)
-{
-  // FIXME: figure out a better way
-  double factor = (double)rand() / RAND_MAX;
-  unsigned timeout = (unsigned)(prev_timeout + MIN_PACKET_RETRANS_TIMEOUT +
-    MAX_PACKET_RETRANS_LINEAR_ADD * factor + prev_timeout * factor);
-
-  if (timeout > MAX_PACKET_RETRANS_TIMEOUT) {
-    timeout = MAX_PACKET_RETRANS_TIMEOUT;
-  }
-  return timeout;
-}
-
 // Get next value for the file retransmission timeout
-unsigned MulticastReceiver::get_file_retrans_timeout(unsigned prev_timeout)
+unsigned MulticastReceiver::get_error_retrans_timeout(unsigned prev_timeout)
 {
   // FIXME: figure out a better way
   double factor = (double)rand() / RAND_MAX;
-  unsigned timeout = (unsigned)(prev_timeout + MIN_FILE_RETRANS_TIMEOUT +
-    MAX_FILE_RETRANS_LINEAR_ADD * factor + prev_timeout * factor);
+  unsigned timeout = (unsigned)(prev_timeout + MIN_ERROR_RETRANS_TIMEOUT +
+    MAX_ERROR_RETRANS_LINEAR_ADD * factor + prev_timeout * factor);
 
-  if (timeout > MAX_FILE_RETRANS_TIMEOUT) {
-    timeout = MAX_FILE_RETRANS_TIMEOUT;
+  if (timeout > MAX_ERROR_RETRANS_TIMEOUT) {
+    timeout = MAX_ERROR_RETRANS_TIMEOUT;
   }
   return timeout;
 }
@@ -155,6 +141,47 @@ void MulticastReceiver::time_wait(uint8_t * const buffer)
   }
 }
 
+// Sends error message with information about packets that have not been
+// received.
+void MulticastReceiver::send_missed_packets(uint32_t message_number) {
+  set<uint32_t>::iterator i = missed_packets.begin();
+
+  uint8_t message[MAX_UDP_PACKET_SIZE];
+  MulticastMessageHeader *mmh = new(message)
+    MulticastMessageHeader(MULTICAST_MESSAGE_RETRANS_REQUEST,
+    session_id);
+  mmh->set_number(message_number);
+  mmh->set_responder(local_address);
+  uint32_t *last_position = (uint32_t *)(message +
+    MAX_UDP_PACKET_SIZE) - sizeof(uint32_t) * 2;
+  uint32_t *store_positon = (uint32_t *)(mmh + 1);
+  *store_positon = htonl(*i);
+  ++store_positon;
+  unsigned next_expected = *i + 1;
+  ++i;
+  for (; i != missed_packets.end() && store_positon <= last_position;
+      ++i) {
+    if (*i == next_expected) {
+      ++next_expected;
+    } else {
+      *store_positon = htonl(next_expected - 1);
+      ++store_positon;
+      *store_positon = htonl(*i);
+      ++store_positon;
+      next_expected = *i + 1;
+      DEBUG("Retransmission request for %u-%u\n",
+        ntohl(*(store_positon - 3)), ntohl(*(store_positon - 2)));
+    }
+  }
+  *store_positon = htonl(next_expected - 1);
+  ++store_positon;
+  DEBUG("Retransmission request for %u-%u\n",
+    ntohl(*(store_positon - 2)), ntohl(*(store_positon - 1)));
+  
+  SDEBUG("Send retransmission requests\n");
+  send_datagram(message, (uint8_t *)store_positon - message);
+}
+
 // This routine reads data from the connection and put it into message_queue
 void MulticastReceiver::read_data()
 {
@@ -173,9 +200,8 @@ void MulticastReceiver::read_data()
       sizeof(mreq)) != 0) {
     char addr[INET_ADDRSTRLEN];
     uint32_t i_addr = ntohl(interface_address);
-    DEBUG("Can't join the multicast group " DEFAULT_MULTICAST_ADDR " on %s: %s",
-      inet_ntop(AF_INET, &i_addr, addr, sizeof(addr)),
-      strerror(errno));
+    ERROR("Can't join the multicast group " DEFAULT_MULTICAST_ADDR " on %s: %s",
+      inet_ntop(AF_INET, &i_addr, addr, sizeof(addr)), strerror(errno));
     exit(EXIT_FAILURE);
   }
 
@@ -185,6 +211,8 @@ void MulticastReceiver::read_data()
   int total_time_slept;
   bool is_termination_request_received = false;
   uint32_t termination_request_number;
+  bool is_missed_sent = false;
+  uint32_t first_after_missed = UINT32_MAX;
 
   struct sockaddr_in client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
@@ -202,51 +230,30 @@ void MulticastReceiver::read_data()
       }
     }
 
-    if (missed_packets.size() + error_queue.get_n_errors() > 0) {
+    if (error_queue.get_n_errors() > 0) {
       total_time_slept = 0;
       while(1) {
         // FIXME: error check ???
         int time_to_sleep;
         unsigned time_passed;
-        enum WhatToSend {send_message_retrans_request, send_error};
-        WhatToSend what_to_send;
-        if (error_queue.get_n_errors() > 0) {
-          what_to_send = send_error;
-          list<MulticastErrorQueue::ErrorMessage*>::iterator it =
-            error_queue.get_error();
-          MulticastErrorQueue::ErrorMessage *frr = *it;
-  
-          struct timeval current_time;
-          gettimeofday(&current_time, NULL);
-          time_passed =
-            (current_time.tv_sec - frr->timestamp.tv_sec) * 1000 +
-            (current_time.tv_usec - frr->timestamp.tv_usec) / 1000;
-    
-          DEBUG("Time passed (error): %u\n", time_passed);
-          if (time_passed > frr->retrans_timeout) {
-            time_to_sleep = 0;
-          } else {
-            time_to_sleep = frr->retrans_timeout - time_passed;
-          }
-          DEBUG("Time before the next retransmission (error): %u\n",
-            time_to_sleep);
-        } else if (missed_packets.size() > 0) {
-          what_to_send = send_message_retrans_request;
-          PacketRetransRequest *p = &missed_packets.front();
-          struct timeval current_time;
-          gettimeofday(&current_time, NULL);
-          time_passed =
-            (current_time.tv_sec - p->timestamp.tv_sec) * 1000 +
-            (current_time.tv_usec - p->timestamp.tv_usec) / 1000;
-    
-          DEBUG("Time passed (mp): %u\n", time_passed);
-          if (time_passed > p->retrans_timeout) {
-            time_to_sleep = 0;
-          } else {
-            time_to_sleep = p->retrans_timeout - time_passed;
-          }
-          DEBUG("Time before the next retransmission (mp): %u\n", time_to_sleep);
+        list<MulticastErrorQueue::ErrorMessage*>::iterator it =
+          error_queue.get_error();
+        MulticastErrorQueue::ErrorMessage *em = *it;
+
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
+        time_passed =
+          (current_time.tv_sec - em->timestamp.tv_sec) * 1000 +
+          (current_time.tv_usec - em->timestamp.tv_usec) / 1000;
+
+        DEBUG("Time passed (error): %u\n", time_passed);
+        if (time_passed > em->retrans_timeout) {
+          time_to_sleep = 0;
+        } else {
+          time_to_sleep = em->retrans_timeout - time_passed;
         }
+        DEBUG("Time before the next retransmission (error): %u\n",
+          time_to_sleep);
   
         int poll_result;
         if (time_to_sleep == 0 ||
@@ -260,48 +267,31 @@ void MulticastReceiver::read_data()
               sizeof(addr)));
             exit(EXIT_FAILURE);
           }
-          if (what_to_send == send_message_retrans_request) {
-            PacketRetransRequest *p = &missed_packets.front();
-            MulticastMessageHeader mmh(MULTICAST_MESSAGE_RETRANS_REQUEST,
-              session_id);
-            mmh.set_number(p->number);
-            mmh.set_responder(local_address);
-            DEBUG("Send a retransmission request for the packet %u\n",
-              p->number);
-            send_datagram(&mmh, sizeof(mmh));
-
-            gettimeofday(&p->timestamp, NULL);
-            p->retrans_timeout = get_packet_retrans_timeout(p->retrans_timeout);
-            DEBUG("New timeout: %u\n", p->retrans_timeout);
-            missed_packets.push_back(*p);
-            missed_packets.pop_front();
-          } else {
-            assert(what_to_send == send_error);
-            list<MulticastErrorQueue::ErrorMessage*>::iterator it =
-              error_queue.get_error();
-            MulticastErrorQueue::ErrorMessage *frr = *it;
-            DEBUG("Send a file retransmission request %u\n",
-              ((MulticastMessageHeader *)frr->message)->get_number());
-            if (sendto(sock, frr->message, frr->message_size, 0,
-              (struct sockaddr *)&source_addr, sizeof(source_addr)) < 0) {
-              ERROR("Can't send a file retransmission request: %s\n",
-                strerror(errno));
-              abort();
-            }
-            gettimeofday(&frr->timestamp, NULL);
-            frr->retrans_timeout = get_file_retrans_timeout(frr->retrans_timeout);
-            DEBUG("New timeout: %u\n", frr->retrans_timeout);
-            error_queue.move_back(it);
+          list<MulticastErrorQueue::ErrorMessage*>::iterator it =
+            error_queue.get_error();
+          MulticastErrorQueue::ErrorMessage *em = *it;
+          DEBUG("Send a file retransmission request %u\n",
+            ((MulticastMessageHeader *)em->message)->get_number());
+          if (sendto(sock, em->message, em->message_size, 0,
+            (struct sockaddr *)&source_addr, sizeof(source_addr)) < 0) {
+            ERROR("Can't send a file retransmission request: %s\n",
+              strerror(errno));
+            abort();
           }
+          gettimeofday(&em->timestamp, NULL);
+          em->retrans_timeout = get_error_retrans_timeout(em->retrans_timeout);
+          DEBUG("New timeout: %u\n", em->retrans_timeout);
+          error_queue.move_back(it);
         } else if (poll_result > 0) {
           // There are some input available, this is the only exit from
           // the infinite loop
           break;
         } else {
-          perror("poll error");
+          ERROR("poll call returned: %s", strerror(errno));
+          abort();
         }
 
-        assert(missed_packets.size() + error_queue.get_n_errors() > 0);
+        assert(error_queue.get_n_errors() > 0);
       }
     } else {
       // Poll here is to kill idle connections
@@ -364,32 +354,31 @@ void MulticastReceiver::read_data()
 
       uint32_t message_num = mmh->get_number();
       if (next_message_expected != message_num) {
+        DEBUG("Unexpected packet: %d, expected %d\n", message_num,
+          next_message_expected);
         if (cyclic_less(message_num, next_message_expected)) {
           // A retransmission received
-          list<PacketRetransRequest>::iterator i;
-          DEBUG("Retransmission received, number "
-            "of missed messages: %zu\n", missed_packets.size());
-          if ((i = find(missed_packets.begin(), missed_packets.end(),
-              PacketRetransRequest(message_num))) != missed_packets.end()) {
+          set<uint32_t>::iterator i = missed_packets.find(message_num);
+          if (i != missed_packets.end()) {
             missed_packets.erase(i);
           }
-          // Send the pending replies
-          while (!is_termination_request_received &&
-              pending_replies.size() > 0 &&
-              cyclic_less(pending_replies.front(),
-              missed_packets.front().number)) {
-            send_reply(pending_replies.front());
-            pending_replies.pop_front();
+          DEBUG("Retransmission for %u(%zu) received\n", message_num,
+            missed_packets.size());
+          // We can send a new error message
+          if (is_missed_sent &&
+              cyclic_less_or_equal(message_num, first_after_missed)) {
+            is_missed_sent = false;
           }
-          DEBUG("missed messages after: %zu\n", missed_packets.size());
         } else {
           // Some packets lost
+          // TODO: some additional packets have been missed.
+          // For fast recovery we can send information about new 
+          // missed packets in the next reply.
           for (; next_message_expected != message_num;
             ++next_message_expected) {
-            DEBUG("Packet %u lost\n", next_message_expected);
-            missed_packets.push_back(PacketRetransRequest(next_message_expected));
-            DEBUG("Number of pending retransmissions: %zu\n",
+            DEBUG("Packet %u (%zu) lost\n", next_message_expected,
               missed_packets.size());
+            missed_packets.insert(next_message_expected);
           }
           next_message_expected++;
         }
@@ -397,8 +386,6 @@ void MulticastReceiver::read_data()
         next_message_expected++;
       }
 
-      DEBUG("type: %x (%x)\n", mmh->get_message_type(),
-        MULTICAST_TERMINATION_REQUEST);
       if (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
         // Search whether the local address contained in this message
         uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
@@ -407,31 +394,35 @@ void MulticastReceiver::read_data()
           htonl(local_address));
         if (i != hosts_end) {
           // The host is supposed to reply to this message
-          SDEBUG("Termination request received\n");
-          is_termination_request_received = true;
-          termination_request_number = mmh->get_number();
+          if (!is_termination_request_received) {
+            SDEBUG("Termination request received\n");
+            is_termination_request_received = true;
+            termination_request_number = mmh->get_number();
+          }
+          if (missed_packets.size() > 0 &&
+              cyclic_less(*missed_packets.begin(), message_num)) {
+            // FIXME: ACK flooding is possible here
+            send_missed_packets(message_num);
+          }
         }
       } else {
+        SDEBUG("Normal packet\n");
         // FIXME: check the message type here
-        // Reply to the message or schedule the reply after some 
-        // lost packets will be received.
-        if (mmh->get_responder() == local_address &&
-            !is_termination_request_received) {
-          // Send the reply if there were no packets lost
+        // Reply to the message if required
+        if (mmh->get_responder() == local_address) {
           if (missed_packets.size() == 0 ||
-              cyclic_greater(missed_packets.front().number, message_num)) {
-            // Clear the pending replies
-            while (pending_replies.size() > 0 &&
-                cyclic_less(pending_replies.front(), message_num)) {
-              pending_replies.pop_front();
-            }
+              cyclic_greater(*missed_packets.begin(), message_num)) {
+            // No packets've been lost, send the reply
             send_reply(message_num);
           } else {
-            // There are some lost packets, we can't send the reply now
-            pending_replies.insert(
-              find_if(pending_replies.begin(), pending_replies.end(),
-              bind2nd(greater<uint32_t>(), message_num)),
-              message_num);
+            // Some packets are lost, send information about this
+            // if it has not been send in reply to some previous
+            // packet.
+            if (!is_missed_sent) {
+              send_missed_packets(message_num);
+              is_missed_sent = true;
+              first_after_missed = message_num;
+            }
           }
         }
       }
@@ -486,7 +477,7 @@ void MulticastReceiver::session()
           }
           uint8_t *end_of_message = (uint8_t *)mmh + length;
           uint32_t *nsources_p = (uint32_t *)(mmh + 1);
-          nsources = ntohl(*nsources_p);
+          n_sources = ntohl(*nsources_p);
           DestinationHeader *p = (DestinationHeader *)(nsources_p + 1);
           while((uint8_t *)p + sizeof(DestinationHeader) <= end_of_message) {
             DEBUG("%x (%x)\n", p->get_addr(), local_address);
@@ -500,7 +491,7 @@ void MulticastReceiver::session()
               memcpy(path, p + 1, pathlen);
               path[pathlen] = '\0';
               char *error;
-              path_type = get_path_type(path, &error, nsources);
+              path_type = get_path_type(path, &error, n_sources);
               if (path_type == path_is_invalid) {
                 //register_error(STATUS_FATAL_DISK_ERROR, error);
                 DEBUG("%s\n", error);

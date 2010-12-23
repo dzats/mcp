@@ -29,5 +29,5 @@ void free_targetdir_name(const char *dirname,
 
 // Detect the type of the 'path'. If this function returns path_is_invalid
 // 'error' points to the corresponding error message
-PathType get_path_type(const char *path, char **error, unsigned nsources);
+PathType get_path_type(const char *path, char **error, unsigned n_sources);
 #endif

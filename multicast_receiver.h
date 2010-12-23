@@ -16,31 +16,9 @@
 // The multicast receiver object (one per multicast connection)
 class MulticastReceiver
 {
-  // Structure describing some packet that should be reliably
-  // delivered to the source
-  struct PacketRetransRequest
-  {
-    unsigned number;
-    struct timeval timestamp; // timestamp when the last message of this
-      // type has been send
-    unsigned retrans_timeout; // retransmission timeout for this packet
-
-    PacketRetransRequest(unsigned p) : number(p) {
-      timestamp.tv_sec = 0;
-      timestamp.tv_usec = 0;
-      retrans_timeout = 0;
-    }
-    bool operator==(const PacketRetransRequest& second) const {
-      return second.number == number;
-    }
-  };
-
-  static const unsigned MIN_PACKET_RETRANS_TIMEOUT = 2; // milliseconds
-  static const unsigned MAX_PACKET_RETRANS_TIMEOUT = 1000; // milliseconds
-  static const unsigned MAX_PACKET_RETRANS_LINEAR_ADD = 20; // milliseconds
-  static const unsigned MIN_FILE_RETRANS_TIMEOUT = 20; // milliseconds
-  static const unsigned MAX_FILE_RETRANS_TIMEOUT = 1000; // milliseconds
-  static const unsigned MAX_FILE_RETRANS_LINEAR_ADD = 8; // milliseconds
+  static const unsigned MIN_ERROR_RETRANS_TIMEOUT = 20; // milliseconds
+  static const unsigned MAX_ERROR_RETRANS_TIMEOUT = 1000; // milliseconds
+  static const unsigned MAX_ERROR_RETRANS_LINEAR_ADD = 8; // milliseconds
   static const unsigned MAX_IDLE_TIME = 8000; // milliseconds
 
   int sock; // Socket used for connection
@@ -52,11 +30,10 @@ class MulticastReceiver
 
   char *path; // local destination path
   PathType path_type;
-  uint32_t nsources; // number of sources
+  uint32_t n_sources; // number of sources
 
   in_addr_t own_addr;
-  std::list<PacketRetransRequest> missed_packets;
-  std::list<uint32_t> pending_replies;
+  std::set<uint32_t> missed_packets;
 
   MulticastRecvQueue message_queue;
   MulticastErrorQueue error_queue;
@@ -74,15 +51,16 @@ class MulticastReceiver
   // Send a reply for the packet 'number' to the source
   void send_reply(uint32_t number);
 
-  // Get next value for the message retransmission timeout
-  unsigned get_packet_retrans_timeout(unsigned prev_timeout);
-
-  // Get next value for the file retransmission timeout
-  unsigned get_file_retrans_timeout(unsigned prev_timeout);
+  // Get next timeout value for an error message retransmission
+  unsigned get_error_retrans_timeout(unsigned prev_timeout);
 
   // This method implements something like the TCP's TIME_WAIT state. It waits
   // for possible retransmissions of the MULTICAST_TERMINATION_REQUEST message.
   void time_wait(uint8_t * const buffer);
+
+  // Sends error message with information about packets that have not been
+  // received.
+  void send_missed_packets(uint32_t message_number);
 
   // This routine reads data from the connection and put it into the queue
   void read_data();
@@ -94,7 +72,7 @@ public:
       uint32_t sid, uint32_t local_addr, uint32_t interface_addr) :
       sock(s), source_addr(saddr), session_id(sid),
       local_address(local_addr), interface_address(interface_addr),
-      path(NULL), nsources(0), next_message_expected(0), fd(-1),
+      path(NULL), n_sources(0), next_message_expected(0), fd(-1),
       filename(NULL) {}
   ~MulticastReceiver()
   {
