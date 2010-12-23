@@ -197,7 +197,7 @@ void* MulticastSendQueue::get_first_unacknowledged_message(size_t *size) {
 				target_addresses + n_destinations, mmh->get_responder());
 			if (t != target_addresses + n_destinations &&
 					*t == mmh->get_responder() &&
-					first_to_acknowledge[target_addresses - t] <= i) {
+					first_to_acknowledge[t - target_addresses] <= i) {
 				*size = buffer[i]->size;
 				register void *message = buffer[i]->message;
 				pthread_mutex_unlock(&_mutex);
