@@ -76,6 +76,9 @@ private:
     // provide reliability
   unsigned next_message; // number of the next message
   unsigned next_responder; // ordinal number of the next responder
+#ifndef NDEBUG
+  unsigned total_bytes_sent; // Total number of bytes that have been send
+#endif
 
   // Received errors and file retransmission requests (used for protection
   // against replies of such messages).
@@ -93,6 +96,9 @@ public:
   {
     address = inet_addr(DEFAULT_MULTICAST_ADDR);
     session_id = getpid() + ((n_retrans & 0xFF) << 24);
+#ifndef NDEBUG
+    total_bytes_sent = 0; // Total number of bytes that have been send
+#endif
   }
   ~MulticastSender()
   {

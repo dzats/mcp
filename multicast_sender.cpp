@@ -254,14 +254,18 @@ void* MulticastSender::multicast_delivery_control_wrapper(void *arg)
 // Helper fuction that sends 'message' to the udp socket.
 void MulticastSender::udp_send(const void *message, int size, int flags)
 {
+#ifndef NDEBUG
+  total_bytes_sent += size;
+#endif
 #if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
   char taddr[INET_ADDRSTRLEN];
   struct timeval current_time;
   gettimeofday(&current_time, NULL);
-  DEBUG("(%u, %u) udp_send %d, %d bytes to %s:%d\n",
+  DEBUG("(%u, %u) udp_send %d, %d(%d) bytes to %s:%d\n",
     (unsigned)current_time.tv_sec, (unsigned)current_time.tv_usec,
     ((MulticastMessageHeader *)message)->get_number(),
-    size, inet_ntop(AF_INET, &target_address.sin_addr, taddr, sizeof(taddr)),
+    size, total_bytes_sent,
+    inet_ntop(AF_INET, &target_address.sin_addr, taddr, sizeof(taddr)),
     ntohs(target_address.sin_port));
 #endif
   int sendto_result;
@@ -845,6 +849,8 @@ int MulticastSender::session()
             "Can't finish multicast session: %s",
             "too many retransmissions of the termination request message");
           return -1;
+        } else {
+          DEBUG("Transmission is over, %u bytes sent\n", total_bytes_sent);
         }
         is_trailing = true;
       } else {
