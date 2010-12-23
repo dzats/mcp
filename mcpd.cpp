@@ -374,9 +374,9 @@ int main(int argc, char **argv)
     exit(EXIT_FAILURE);
   }
 
-  int unicast_sock;
+  int unicast_sock = 0;
   unsigned n_multicast_sockets = 0;
-  int *multicast_sockets;
+  int *multicast_sockets = NULL;
   struct pollfd *pfds;
   nfds_t n_pfds;
   vector<uint32_t> addresses; // Local IP addresses (non-loopback)

@@ -203,7 +203,7 @@ uint8_t FileReader::handle_directory_with_content(char *name,
 {
   DIR *dirp;
   struct dirent *dp;
-  uint8_t status;
+  uint8_t status = STATUS_OK;
 
   // Assume that there will be no slashes at the end of name
   int rootdir_basename_offset;

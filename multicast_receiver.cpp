@@ -292,7 +292,7 @@ void MulticastReceiver::read_messages()
   pfd.events = POLLIN;
   int total_time_slept;
   bool is_termination_request_received = false;
-  uint32_t termination_request_number;
+  uint32_t termination_request_number = 0;
   bool is_missed_sent = false;
   uint32_t previous_retrans = UINT32_MAX;
 

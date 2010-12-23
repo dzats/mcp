@@ -10,6 +10,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#ifdef linux
+#include <endian.h>
+#include <byteswap.h>
+#else
+#include <sys/endian.h> // for be64toh
+#endif
+
 #include <inttypes.h> // for uint64_t
 #include <arpa/inet.h> // for htonl/ntohl
 
@@ -307,18 +314,32 @@ static inline bool cyclic_less_or_equal(uint32_t a, uint32_t b)
 
 static inline uint64_t hton64(uint64_t arg)
 {
-  uint64_t result;
-  register uint32_t *p = (uint32_t *)&result;
-  p[0] = htonl(arg & UINT32_MAX);
-  p[1] = htonl(arg >> 32);
-  
-  return result;
+#ifdef linux
+#if __BYTE_ORDER == __BIG_ENDIAN
+  return arg;
+#elif __BYTE_ORDER == __LITTLE_ENDIAN
+  return bswap_64(arg);
+#else
+#error Unknown byte order
+#endif
+#else
+  return htobe64(arg);
+#endif
 }
 
 static inline uint64_t ntoh64(uint64_t arg)
 {
-  uint32_t *s = (uint32_t *)&arg;
-  return ntohl(s[0]) + ((uint64_t)ntohl(s[1]) << 32);
+#ifdef linux
+#if __BYTE_ORDER == __BIG_ENDIAN
+  return arg;
+#elif __BYTE_ORDER == __LITTLE_ENDIAN
+  return bswap_64(arg);
+#else
+#error Unknown byte order
+#endif
+#else
+  return be64toh(arg);
+#endif
 }
 
 /*
