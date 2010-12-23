@@ -101,8 +101,10 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
       INADDR_NONE);
   }
   pthread_mutex_lock(&mutex);
+#ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("missed: %zu, max_rtt: %u\n", missed_packets.size(),
     max_round_trip_time);
+#endif
 
   const void *message_to_send = message;
   while (missed_packets.size() > 0) {
@@ -112,7 +114,9 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
 
     unsigned offset = number -
       ((MulticastMessageHeader *)buffer[0]->message)->get_number();
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("error offset: %d\n", offset);
+#endif
 
     if (offset < store_position) {
       message_to_send = buffer[offset]->message;
@@ -236,8 +240,10 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
       // Congestion avoidance
       window_size += (MAX_UDP_PACKET_SIZE * data_delivered) / window_size;
     }
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("New window size is %u (%u/%u)\n", window_size, data_delivered,
       data_on_flow);
+#endif
   }
   last_data_on_flow_evaluation = current_time;
   data_on_flow -= data_delivered;
@@ -294,12 +300,16 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
   struct timeval current_time;
   gettimeofday(&current_time, NULL);
   pthread_mutex_lock(&mutex);
+#ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("MulticastSendQueue::acknowledge (%u, %d) (%u, %zu)\n", 
     number, destination, store_position, buffer.size());
+#endif
 
   unsigned offset = number -
     ((MulticastMessageHeader *)buffer[0]->message)->get_number();
+#ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("offset: %d\n", offset);
+#endif
 
   if (offset >= store_position) {
     // Ignore this conformation
@@ -318,7 +328,9 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     unsigned received_rtt =
       (current_time.tv_sec - buffer[offset]->timestamp.tv_sec) * 1000000 +
       current_time.tv_usec - buffer[offset]->timestamp.tv_usec;
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("Received round trip time: %d\n", received_rtt);
+#endif
     unsigned previous_rtt = round_trip_times[destination];
     if (round_trip_times[destination] * 2 > received_rtt) {
       round_trip_times[destination] = received_rtt;
@@ -407,7 +419,9 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
     unsigned received_rtt =
       (current_time.tv_sec - buffer[offset]->timestamp.tv_sec) * 1000000 +
       current_time.tv_usec - buffer[offset]->timestamp.tv_usec;
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("Received round trip time: %d\n", received_rtt);
+#endif
     unsigned previous_rtt = round_trip_times[destination];
     if (round_trip_times[destination] * 2 > received_rtt) {
       round_trip_times[destination] = received_rtt;
@@ -435,7 +449,9 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
 #endif
       ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
       window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
+#ifdef DETAILED_MULTICAST_DEBUG
       DEBUG("New window size: %u\n", window_size);
+#endif
 #if 0
       last_packet_caused_congestion = 
         ((MulticastMessageHeader *)buffer[store_position - 1]->message)->get_number();
@@ -492,7 +508,9 @@ int MulticastSendQueue::wait_for_destinations(const struct timespec *till_time)
   pthread_mutex_lock(&mutex);
   is_some_destinations_replied = false;
   if (store_position != 0) {
+#ifdef DETAILED_MULTICAST_DEBUG
     SDEBUG("Wait for the replies from destinations\n");
+#endif
     int error = pthread_cond_timedwait(&transmission_finished_cond, &mutex,
       till_time);
     if (error != 0) {

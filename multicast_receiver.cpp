@@ -83,7 +83,8 @@ int MulticastReceiver::send_datagram(void *data, size_t length)
 // Sends error message with information about packets
 // that have not been received.
 // Returns zero on success and error code otherwise.
-int MulticastReceiver::send_missed_packets(uint32_t message_number) {
+int MulticastReceiver::send_missed_packets(uint32_t message_number)
+{
   set<uint32_t>::iterator i = missed_packets.begin();
 
   uint8_t message[MAX_UDP_PACKET_SIZE];
@@ -125,7 +126,9 @@ int MulticastReceiver::send_missed_packets(uint32_t message_number) {
 // Returns zero on success and error code otherwise
 int MulticastReceiver::send_reply(uint32_t number)
 {
+#ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("Send a reply for the packet %u\n", number);
+#endif
   MulticastMessageHeader mmh(MULTICAST_RECEPTION_CONFORMATION, session_id);
   mmh.set_number(number);
   return send_datagram(&mmh, sizeof(mmh));
@@ -209,7 +212,8 @@ void MulticastReceiver::time_wait(uint8_t * const buffer)
 
 // Finish the multicast receiver process if there were no messages from
 // the multicast sender during MAX_IDLE_TIME
-void MulticastReceiver::exit_on_timeout_from_read_messages() {
+void MulticastReceiver::exit_on_timeout_from_read_messages()
+{
   // TODO: It can worth to implement someting like keepalive feature,
   // instead of simply close the connection.
   char addr[INET_ADDRSTRLEN];
@@ -291,14 +295,18 @@ void MulticastReceiver::read_messages()
           (current_time.tv_sec - em->timestamp.tv_sec) * 1000 +
           (current_time.tv_usec - em->timestamp.tv_usec) / 1000;
 
+#ifdef DETAILED_MULTICAST_DEBUG
         DEBUG("Time passed (error): %u\n", time_passed);
+#endif
         if (time_passed > em->retrans_timeout) {
           time_to_sleep = 0;
         } else {
           time_to_sleep = em->retrans_timeout - time_passed;
         }
+#ifdef DETAILED_MULTICAST_DEBUG
         DEBUG("Time before the next retransmission (error): %u\n",
           time_to_sleep);
+#endif
   
         int poll_result;
         if (time_to_sleep == 0 ||
@@ -358,7 +366,7 @@ void MulticastReceiver::read_messages()
         len <= MAX_UDP_PACKET_SIZE) {
       MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
       uint32_t message_number = mmh->get_number();
-#ifndef NDEBUG
+#if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
       {
         char sender_a[INET_ADDRSTRLEN];
         char responder_a[INET_ADDRSTRLEN];
@@ -406,8 +414,10 @@ void MulticastReceiver::read_messages()
       }
 
       if (next_message_expected != message_number) {
+#ifdef DETAILED_MULTICAST_DEBUG
         DEBUG("Unexpected packet: %d, expected %d\n", message_number,
           next_message_expected);
+#endif
         if (cyclic_less(message_number, next_message_expected)) {
           // A retransmission received
           set<uint32_t>::iterator i = missed_packets.find(message_number);
@@ -482,11 +492,15 @@ void MulticastReceiver::read_messages()
           }
           break;
         default:
+#ifdef DETAILED_MULTICAST_DEBUG
           SDEBUG("Normal packet\n");
+#endif
           // FIXME: check the message type here
           // Reply to the message if required
           if (mmh->get_responder() == local_address) {
+#ifdef DETAILED_MULTICAST_DEBUG
             SDEBUG("Packet destinated to this host\n");
+#endif
             if (missed_packets.size() == 0 ||
                 cyclic_greater(*missed_packets.begin(), message_number)) {
               // No packets've been lost, send the reply
@@ -709,8 +723,10 @@ int MulticastReceiver::session()
         }
         break;
       case MULTICAST_FILE_DATA:
+#ifdef DETAILED_MULTICAST_DEBUG
         DEBUG("MULTICAST_FILE_DATA(%d) message received\n",
           mmh->get_number());
+#endif
         if (fd == -1) {
           assert(filename != NULL);
           DEBUG("Ignore MULTICAST_FILE_DATA for %s\n", filename);
@@ -728,11 +744,11 @@ int MulticastReceiver::session()
             register int bytes_written = write(fd, data, size);
             if (bytes_written < 0) {
               DEBUG("Write error for %s: %s\n", filename, strerror(errno));
-              register_error(STATUS_FATAL_DISK_ERROR,
+              register_error(STATUS_NOT_FATAL_DISK_ERROR,
                 "Write error for %s: %s\n", filename, strerror(errno));
-              message_queue.set_fatal_error();
-              pthread_join(read_messages_thread, NULL);
-              return EXIT_FAILURE;
+              close(fd);
+              fd = -1;
+              break;
             } else {
               size -= bytes_written;
               data = data + bytes_written;

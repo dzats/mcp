@@ -69,7 +69,9 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
 {
   assert(length <= MAX_UDP_PACKET_SIZE);
   pthread_mutex_lock(&mutex);
+#ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("%u, %u, %u\n", last_num, first_num, n_messages);
+#endif
   if (cyclic_greater(number, last_num)) {
     bool do_wake_reader = n_messages == 0 && number == last_num + 1;
     // Check space in the buffer
@@ -103,7 +105,9 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
     ++n_messages;
     last_num = number;
     first_num = number - n_messages + 1;
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("%u, %u, %u\n", last_num, first_num, n_messages);
+#endif
     if (do_wake_reader) {
       pthread_cond_signal(&data_ready_cond);
     }
@@ -142,7 +146,6 @@ void* MulticastRecvQueue::get_message(size_t *length)
     return NULL;
   }
 
-  DEBUG("Get the message: %u\n", first_num);
   swapper->length = 0;
   buffer.push_back(swapper);
   swapper = buffer.front();
@@ -152,7 +155,6 @@ void* MulticastRecvQueue::get_message(size_t *length)
     first_num++;
   }
   *length = swapper->length;
-  DEBUG("Get the message: %u\n", first_num);
   pthread_mutex_unlock(&mutex);
   return swapper->message;
 }

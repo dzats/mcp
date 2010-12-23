@@ -510,6 +510,7 @@ int main(int argc, char **argv)
               for (unsigned i = 0; i < n_multicast_sockets; ++i) {
                 close(multicast_sockets[i]);
               }
+              close(unicast_sock);
               // Create a MulticastReceiver object
               MulticastReceiver *multicast_receiver =
                 new MulticastReceiver(ephemeral_sock, source_addr,
@@ -558,6 +559,9 @@ int main(int argc, char **argv)
             // Return to the accept call
             continue;
           } else if (pid == 0) {
+            for (unsigned i = 0; i < n_multicast_sockets; ++i) {
+              close(multicast_sockets[i]);
+            }
             close(unicast_sock);
             // execute the main routine
           } else {
@@ -691,9 +695,7 @@ int main(int argc, char **argv)
   
         // Start the main routine (read files and directories and pass them
         // to the distributor)
-        if (unicast_receiver->session() != 0) {
-          unicast_receiver->send_errors(client_sock);
-        }
+        int unicast_receiver_session_result = unicast_receiver->session();
   
         pthread_join(file_writer_thread, NULL);
         if (is_unicast_sender_started) {
@@ -712,9 +714,9 @@ int main(int argc, char **argv)
         delete file_writer;
         delete unicast_receiver;
         if (unicast_sender != NULL) { delete unicast_sender; }
-        if (multicast_sender != NULL) { delete unicast_sender; }
+        if (multicast_sender != NULL) { delete multicast_sender; }
         if (!debug_mode) {
-          return EXIT_FAILURE;
+          return unicast_receiver_session_result;
         } else {
           continue;
         }

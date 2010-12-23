@@ -25,6 +25,7 @@ void Distributor::SimpleError::display() const
     ERROR("%s\n", message);
   }
 }
+
 void Distributor::SimpleError::send(int sock)
 {
   try {

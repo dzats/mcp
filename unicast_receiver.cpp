@@ -27,6 +27,7 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
   p.events = POLLIN | POLLPRI;
 
   uint64_t total = 0;
+  int flags = 0;
   bool has_file_been_shrinked = false; // whether the file has been shrinked
     // during the transmission
   while(1) {
@@ -53,7 +54,6 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       throw ConnectionException(errno);
     }
     if (p.revents & POLLPRI) {
-      SDEBUG("Priority band data received\n");
       // Try to get the out of band data
       uint8_t oob_data;
       int count = recv(sock, &oob_data, sizeof(oob_data),
@@ -82,13 +82,11 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
         }
       } else {
         if (errno == EAGAIN) {
+          flags |= MSG_DONTWAIT;
           SDEBUG("Out of band data is not ready\n");
         } else if (errno == EINVAL) {
+          flags |= MSG_DONTWAIT;
           SDEBUG("recv returned EINVAL\n");
-          if ((p.revents & POLLIN) == 0) {
-            // Normal data is not ready too
-            continue;
-          }
         } else {
           // An error occurred
           DEBUG("Socket read error on %s: (%u)%s\n", filename, errno,
@@ -103,7 +101,7 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
     }
 
     // Normal data received
-    count = recv(sock, rposition(), count, 0);
+    count = recv(sock, rposition(), count, flags);
     if (count > 0) {
       // Update the checksum
       checksum.update((unsigned char *)rposition(), count);
@@ -126,6 +124,10 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       DEBUG("Unexpected end of transmission for the file %s\n", filename);
       throw ConnectionException(ConnectionException::unexpected_end_of_input);
     } else {
+      if (errno == EAGAIN) {
+        // Data is not ready
+        continue;
+      }
       // An error occurred
       DEBUG("Socket read error on %s: %s\n", filename, strerror(errno));
 #if 0
@@ -297,11 +299,13 @@ int UnicastReceiver::session()
         SDEBUG("End of the transmission\n");
         if (finish_work() >= STATUS_FIRST_FATAL_ERROR) {
           // A fatal error occurred
-          return -1;
+          send_errors(sock);
+          return EXIT_FAILURE;
         } else {
-          // FIXME: What to do with the retransmission request in this case
+          // Send the errors occurred , if any
+          send_errors(sock);
           send_normal_conformation(sock, local_address);
-          return 0;
+          return EXIT_SUCCESS;
         }
       }
       if (finfo.get_name_length() >= MAXPATHLEN) {
@@ -351,7 +355,7 @@ int UnicastReceiver::session()
           SDEBUG("UnicastReceiver finished with error\n");
           finish_task();
           finish_work();
-          return -1;
+          return EXIT_FAILURE;
         }
       } else {
         DEBUG("Directory: %s(%s) (%o)\n", path,
@@ -369,14 +373,14 @@ int UnicastReceiver::session()
         errors.send(sock);
         if (status >= STATUS_FIRST_FATAL_ERROR) {
           finish_work();
-          return -1;
+          return EXIT_FAILURE;
         }
       }
     } catch(ConnectionException& e) {
       DEBUG("Network error during transmission: %s\n", e.what());
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Network error during transmission: %s\n", e.what());
-      return -1;
+      return EXIT_FAILURE;
     }
   }
 }

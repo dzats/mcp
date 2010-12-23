@@ -100,7 +100,7 @@ void MulticastSender::multicast_delivery_control()
   while (do_work) {
     int length = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
       (struct sockaddr*)&client_addr, &client_addr_len);
-#ifndef NDEBUG
+#if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
     char caddr[INET_ADDRSTRLEN];
     DEBUG("Received a message from %s (%d)\n",
       inet_ntop(AF_INET, &client_addr.sin_addr.s_addr, caddr, sizeof(caddr)),
@@ -254,7 +254,7 @@ void* MulticastSender::multicast_delivery_control_wrapper(void *arg)
 // Helper fuction that sends 'message' to the udp socket.
 void MulticastSender::udp_send(const void *message, int size, int flags)
 {
-#ifndef NDEBUG
+#if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
   char taddr[INET_ADDRSTRLEN];
   struct timeval current_time;
   gettimeofday(&current_time, NULL);
@@ -268,7 +268,7 @@ void MulticastSender::udp_send(const void *message, int size, int flags)
   do {
     sendto_result = sendto(sock, message, size, 0,
       (struct sockaddr *)&target_address, sizeof(target_address));
-#ifndef NDEBUG
+#if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
     if (sendto_result == -1 && errno == ENOBUFS) {
       SDEBUG("ENOBUFS error occurred\n");
     }
@@ -283,7 +283,7 @@ void MulticastSender::udp_send(const void *message, int size, int flags)
 // Helper fuction which reliably sends message to the multicast connection.
 void MulticastSender::mcast_send(const void *message, int size)
 {
-#ifndef NDEBUG
+#if defined(DETAILED_MULTICAST_DEBUG) && !defined(NDEBUG)
   char dst_addr[INET_ADDRSTRLEN];
   DEBUG("Send %d bytes to %s:%d\n", size,
     inet_ntop(AF_INET, &target_address.sin_addr, dst_addr, sizeof(dst_addr)),
@@ -566,7 +566,9 @@ const std::vector<Destination>* MulticastSender::session_init(
         time_difference = INIT_RETRANSMISSION_RATE - time_difference;
         if (time_difference < 0) { time_difference = 0; }
   
+#ifdef DETAILED_MULTICAST_DEBUG
         DEBUG("Time to sleep: %d\n", time_difference);
+#endif
         int poll_result;
         if ((poll_result = poll(&pfds, 1, time_difference / 1000)) > 0) {
           uint8_t buffer[UDP_MAX_LENGTH];

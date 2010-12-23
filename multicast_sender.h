@@ -52,7 +52,7 @@ private:
   static const unsigned DEFAULT_ROUND_TRIP_TIME = 40000; // (in milliseconds)
   static const unsigned MAX_ERROR_QUEUE_SIZE_MULTIPLICATOR = 4; // Max size
     // of the error queue / number of targets
-  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 32; // Max number
+  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 24; // Max number
     // of the multicast session termination retry messages to be send
   static const unsigned MAX_PORT_CHOOSING_TRIES = 10;
 
