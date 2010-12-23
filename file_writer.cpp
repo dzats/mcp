@@ -87,7 +87,8 @@ int FileWriter::session()
         path, op->fileinfo.get_type(), op->fileinfo.get_mode(),
         op->fileinfo.get_name_length(), op->fileinfo.get_name_offset());
       const char *filename = get_targetfile_name(
-        op->get_filename() + op->fileinfo.get_name_offset(), path, path_type);
+        op->get_filename() + op->fileinfo.get_name_offset(), path, path_type,
+        n_sources);
 
       // Open the output file
       DEBUG("open the file: %s\n", filename);

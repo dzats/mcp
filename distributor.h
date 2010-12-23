@@ -161,6 +161,8 @@ public:
 
     // Sends the occurred error to the imediate unicast source
     void send(int sock);
+    // Sends the first occurred error to the imediate unicast source
+    void send_first(int sock);
 
     // Get the files that should be retransmitted. dest is a value/result
     // argument.

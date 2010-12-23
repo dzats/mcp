@@ -14,6 +14,7 @@ class FileWriter : public Writer
 
   char *path;
   PathType path_type;
+  uint32_t n_sources;
 
   // Prohibit coping for objects of this class
   FileWriter(const FileWriter&);
@@ -26,10 +27,11 @@ public:
     unicast_receiver(ur) {}
   
   // Initialization routine of the file writer class
-  void init(char* p, PathType pt)
+  void init(char* path, PathType path_type, uint32_t n_sources)
   {
-    path = p;
-    path_type = pt;
+    this->path = path;
+    this->path_type = path_type;
+    this->n_sources = n_sources;
   }
 
   // The main routine of the FileWriter class. It reads files and

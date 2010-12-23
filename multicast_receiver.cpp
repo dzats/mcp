@@ -664,7 +664,7 @@ int MulticastReceiver::session()
             DEBUG("File: %s(%s:%u)\n", path, filename,
               fih->get_name_offset());
             const char *target_name = get_targetfile_name(
-              filename + fih->get_name_offset(), path, path_type);
+              filename + fih->get_name_offset(), path, path_type, n_sources);
 
             // Open the output file
             DEBUG("open the file: %s\n", target_name);

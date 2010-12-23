@@ -64,15 +64,23 @@ Distributor::FileRetransRequest::FileRetransRequest(uint32_t addr,
       sizeof(FileInfoHeader) - sizeof(uint32_t)) {
     throw ConnectionException(ConnectionException::corrupted_data_received);
   }
-  filename = (char *)malloc(file_info_header.get_name_length());
+  filename = (char *)malloc(file_info_header.get_name_length() + 1);
   memcpy(filename, fih + 1, file_info_header.get_name_length());
-  uint32_t *p = (uint32_t *)((uint8_t *)(fih + 1) +
+  filename[file_info_header.get_name_length()] = '\0';
+  uint32_t *n_destinations = (uint32_t *)((uint8_t *)(fih + 1) +
     file_info_header.get_name_length());
+  if (n_destinations >=
+      (uint32_t *)((uint8_t *)message + message_length - sizeof(uint32_t)) ||
+      n_destinations + ntohl(*n_destinations) + 1 >
+      (uint32_t *)((uint8_t *)message + message_length)) {
+    throw ConnectionException(ConnectionException::corrupted_data_received);
+  }
+
+  uint32_t *p = n_destinations + 1;
   address = ntohl(*p);
-  while (p <=
-      (uint32_t *)((uint8_t *)message + message_length - sizeof(uint32_t))) {
-    destinations.push_back(Destination(ntohl(*p), NULL));
-    ++p;
+
+  for (unsigned i = 0; i < ntohl(*n_destinations); ++i) {
+    destinations.push_back(Destination(ntohl(p[i]), NULL));
   }
 }
 
@@ -104,14 +112,14 @@ void Distributor::FileRetransRequest::send(int sock)
   }
 
   size_t message_length = sizeof(struct FileInfoHeader) + strlen(filename) +
-    sizeof(uint32_t) + destinations.size()  * sizeof(uint32_t);
+    sizeof(uint32_t) + (destinations.size() + 1)  * sizeof(uint32_t);
   uint8_t *message = (uint8_t *)malloc(message_length);
 
   FileInfoHeader *fih = new(message) FileInfoHeader(file_info_header);
   memcpy(fih + 1, filename, strlen(filename));
   register uint32_t *n_destinations = (uint32_t *)((uint8_t*)(fih + 1) +
     strlen(filename)); 
-  *n_destinations = destinations.size() + 1;
+  *n_destinations = htonl(destinations.size() + 1);
   register uint32_t *addr = n_destinations + 1;
   *addr = htonl(address);
   ++addr;
@@ -120,7 +128,6 @@ void Distributor::FileRetransRequest::send(int sock)
     *addr = htonl(i->addr);
     addr++;
   }
-  *addr = INADDR_NONE;
   try {
     ReplyHeader h(status, address, message_length);
     sendn(sock, &h, sizeof(h), 0);
@@ -160,11 +167,23 @@ bool Distributor::Errors::is_unrecoverable_error_occurred()
   return result;
 }
 
-// Sends the occurred error to the imediate unicast source
+// Sends occurred errors to the imediate unicast source
 void Distributor::Errors::send(int sock)
 {
   pthread_mutex_lock(&mutex);
   while (errors.size() > 0) {
+    errors.front()->send(sock);
+    delete errors.front();
+    errors.pop_front();
+  }
+  pthread_mutex_unlock(&mutex);
+}
+
+// Sends the first occurred error to the imediate unicast source
+void Distributor::Errors::send_first(int sock)
+{
+  pthread_mutex_lock(&mutex);
+  if (errors.size() > 0) {
     errors.front()->send(sock);
     delete errors.front();
     errors.pop_front();
@@ -212,7 +231,7 @@ char** Distributor::Errors::get_retransmissions(vector<Destination> *dest,
       i != filenames.end(); ++i) {
     result[j] = strdup(i->c_str());
     (*filename_offsets)[j] = offsets[*i];
-    DEBUG("Pending retransmission for %s:%d\n", i->c_str(),
+    DEBUG("Pending retransmission for %s:%d\n", result[j],
       (*filename_offsets)[j]);
     ++j;
   }
@@ -364,7 +383,6 @@ uint8_t Distributor::finish_work()
   pthread_mutex_unlock(&mutex);
   return status;
 }
-
 
 /*
   Return free space available for read, blocks until

@@ -12,12 +12,13 @@
 
 #include "path.h"
 #include "log.h"
+#include "connection.h"
 
 // Check for MAXPATHLEN required
 
 // Returns the name of the target file
 const char* get_targetfile_name(const char *source_name,
-    const char *path, PathType path_type)
+    const char *path, PathType path_type, uint32_t n_sources)
 {
   // Figure out the file name
   if (path_type == path_is_default_directory) {
@@ -30,16 +31,39 @@ const char* get_targetfile_name(const char *source_name,
   } else if (path_type == path_is_regular_file ||
       path_type == path_is_nonexisting_object) {
     return path;
-  } else {
-    assert(path_type == path_is_substituted_directory);
+  } else if (path_type == path_is_substituted_directory) {
     int pathlen = strlen(path);
     char *filename = (char *)malloc(pathlen + 1 /* slash */ +
       strlen(source_name) + 1);
     memcpy(filename, path, pathlen);
     char *slash = strchr(source_name, '/');
-    assert(slash != NULL);
+    if (slash == NULL) { abort(); }
     strcpy(filename + pathlen, slash);
     return filename;
+  } else {
+    assert(path_type == path_is_directory_for_retransmission);
+    // Detect the real path type
+    char *p = strchr(source_name, '/');
+    if (p == NULL) { abort(); }
+    char *dirname = (char *)malloc(strlen(path) + 1 +
+      (UINT32_MAX - n_sources + 1) * (p - source_name));
+    strcpy(dirname, path);
+    strcat(dirname, "/");
+    uint32_t n = n_sources;
+    while (n != UINT32_MAX) {
+      strncat(dirname, source_name, p - source_name + 1);
+      ++n;
+    }
+    strncat(dirname, source_name, p - source_name);
+    DEBUG("Directory for retransmission %s\n", dirname);
+    struct stat tstat;
+    if (stat(dirname, &tstat) == 0 && S_ISDIR(tstat.st_mode)) {
+      path_type = path_is_directory;
+    } else {
+      path_type = path_is_substituted_directory;
+    }
+    free(dirname);
+    return get_targetfile_name(source_name, path, path_type, n_sources);
   }
 }
 
@@ -110,7 +134,13 @@ PathType get_path_type(const char *path, char **error, unsigned n_sources)
     if (stat_result == 0) {
       DEBUG("Path %s exists\n", path);
       if (S_ISDIR(s.st_mode)) {
-        return path_is_directory;
+        if (n_sources > INT32_MAX) {
+          // This is a retransmission and the previous source is a
+          // single directory
+          return path_is_directory_for_retransmission;
+        } else {
+          return path_is_directory;
+        }
       } else if (S_ISREG(s.st_mode)) {
         if (n_sources > 1) {
           *error = strdup("Multiple sources specified, the path can't be a "

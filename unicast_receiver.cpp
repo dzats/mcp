@@ -370,8 +370,9 @@ int UnicastReceiver::session()
       status = finish_task();
       // Send errors to the source
       if (status != STATUS_OK) {
-        errors.send(sock);
+        errors.send_first(sock);
         if (status >= STATUS_FIRST_FATAL_ERROR) {
+          errors.send(sock);
           finish_work();
           return EXIT_FAILURE;
         }

@@ -29,7 +29,7 @@
 #include "multicast_sender.h"
 #include "log.h"
 
-#define MAX_RETRANSMISSIONS 3
+#define MAX_RETRANSMISSIONS 5
 
 using namespace std;
 
@@ -290,9 +290,12 @@ int main(int argc, char **argv)
   int *filename_offsets = (int *)malloc(sizeof(int) * n_sources);
   for (unsigned i = 0; i < n_sources; ++i) {
     filenames[i] = prepare_to_basename(argv[i]);
-    filename_offsets[i] = 0;
+    filename_offsets[i] = -1;
     if (filenames[i] == NULL) {
       ERROR("Incorrect path: %s\n", argv[i]);
+      exit(EXIT_FAILURE);
+    } else if (filenames[i][0] == '/' && filenames[i][1] == '\0') {
+      SERROR("You can't copy the / directory\n");
       exit(EXIT_FAILURE);
     }
     // Check for the sources' accessability
@@ -302,12 +305,6 @@ int main(int argc, char **argv)
     }
   }
   filenames[n_sources] = NULL;
-#ifndef NDEBUG
-  printf("Sources:\n");
-  for (int i = 0; filenames[i] != NULL; ++i) {
-    printf("%s\n", filenames[i]);
-  }
-#endif
 
   // Parse the server names, and get the servers' addresses
   vector<Destination> dst;
@@ -362,6 +359,20 @@ int main(int argc, char **argv)
   // Start of the global part, which is 
   bool is_all_done = false;
   unsigned n_retransmissions = 0;
+  uint32_t is_source_a_single_directory = false;
+  char *root_source_directory = NULL;
+  if (n_sources == 1) {
+    struct stat tstat;
+    if (stat(filenames[0], &tstat) != 0) {
+      ERROR("Can't get attributes for file/directory %s: %s\n", filenames[0],
+        strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+    if (S_ISDIR(tstat.st_mode)) {
+      is_source_a_single_directory = true;
+      root_source_directory = strdup(filenames[0]);
+    }
+  }
   do {
     // The main objects
     FileReader *source_reader = new FileReader();
@@ -371,6 +382,13 @@ int main(int argc, char **argv)
     pthread_t multicast_sender_thread;
     bool is_unicast_sender_started = false;
     bool is_multicast_sender_started = false;
+
+#ifndef NDEBUG
+    printf("Sources:\n");
+    for (int i = 0; filenames[i] != NULL; ++i) {
+      printf("%s\n", filenames[i]);
+    }
+#endif
 
 #ifndef NDEBUG
     SDEBUG("Destinations:\n");
@@ -455,7 +473,11 @@ int main(int argc, char **argv)
     }
   
     bool is_unrecoverable_error_occurred = false;
-    if (source_reader->read_sources(filenames, filename_offsets) != 0) {
+    uint8_t source_reader_result = 
+      source_reader->read_sources(filenames, filename_offsets);
+    if (source_reader_result != STATUS_OK &&
+        source_reader_result != STATUS_INCORRECT_CHECKSUM) {
+      SDEBUG("The SourceReader finished with fatal error\n");
       is_unrecoverable_error_occurred = true;
     }
   
@@ -464,12 +486,14 @@ int main(int argc, char **argv)
     if (is_unicast_sender_started) {
       pthread_join(unicast_sender_thread, &result);
       if (result != NULL) {
+        SDEBUG("The UnicastSender finished with fatal error\n");
         is_unrecoverable_error_occurred = true;
       }
     }
     if (is_multicast_sender_started) {
       pthread_join(multicast_sender_thread, &result);
       if (result != NULL) {
+        SDEBUG("The MulticastSender finished with fatal error\n");
         is_unrecoverable_error_occurred = true;
       }
     }
@@ -486,8 +510,10 @@ int main(int argc, char **argv)
     SDEBUG("Finished, clean up the data\n");
     if (multicast_sender != NULL) { delete multicast_sender; }
     if (unicast_sender != NULL) { delete unicast_sender; }
-    for (unsigned i = 0; i < n_sources; ++i) {
-      free(filenames[i]);
+    char **p = filenames;
+    while (*p != NULL) {
+      free(*p);
+      ++p;
     }
     if (remaining_dst != NULL && remaining_dst != &dst) {
       delete remaining_dst;
@@ -504,8 +530,52 @@ int main(int argc, char **argv)
       SDEBUG("No retransmissions required\n");
     } else {
       // Retransmission required for some files
-      n_sources = 2; // to use existing directory in the case when n_sources has
-        // been equal to 1 initially
+      if (is_source_a_single_directory) {
+        // This is the special case which requires a workaround to
+        // allow file retransmissions
+        n_sources = UINT32_MAX;
+        // Detect the number of subdirectories in the root directory
+        // which have the same name as the root directory
+        DIR *dirp;
+        struct dirent *dp;
+        if ((dirp = opendir(root_source_directory)) == NULL) {
+          ERROR("Can't read directory %s: %s\n", root_source_directory,
+            strerror(errno));
+          exit(EXIT_FAILURE);
+        }
+        char *current_directory = strdup(root_source_directory);
+        char *seek_name = strrchr(root_source_directory, '/');
+        if (seek_name == NULL) {
+          seek_name = root_source_directory;
+        } else {
+          ++seek_name;
+        }
+        while ((dp = readdir(dirp)) != NULL) {
+          if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..")) {
+            continue;
+          }
+          if (strlen(current_directory) + 1 + strlen(dp->d_name) > MAXPATHLEN) {
+            ERROR("%s/%s: name is too long\n", current_directory, dp->d_name);
+            continue;
+          }
+          if (!strcmp(dp->d_name, seek_name)) {
+            // We found directory with the same name
+            closedir(dirp);
+            char *new_directory = (char *)malloc(strlen(current_directory) + 1
+              + strlen(dp->d_name) + 1);
+            sprintf(new_directory, "%s/%s", current_directory, dp->d_name);
+            free(current_directory);
+            current_directory = new_directory;
+            if ((dirp = opendir(current_directory)) == NULL) {
+              break;
+            } else {
+              --n_sources;
+            }
+          }
+        }
+        free(current_directory);
+        closedir(dirp);
+      }
       ++n_retransmissions;
       if (n_retransmissions > MAX_RETRANSMISSIONS) {
         char **f = filenames;

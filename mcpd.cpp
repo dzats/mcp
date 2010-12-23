@@ -782,7 +782,8 @@ int main(int argc, char **argv)
         }
   
         // Start the file writer thread
-        file_writer->init(unicast_receiver->path, unicast_receiver->path_type); 
+        file_writer->init(unicast_receiver->path, unicast_receiver->path_type,
+          unicast_receiver->n_sources); 
         int error;
         error = pthread_create(&file_writer_thread, NULL,
           file_writer_routine, (void *)file_writer);

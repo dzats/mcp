@@ -22,49 +22,65 @@ using namespace std;
 
 /*
   The main routine of the mcp programm, it reads sources from
-  the disk and passes them to the distributor. Returns 0
-  on suceess and something else otherwise (error can be
-  detected by the distributor's state).
+  the disk and passes them to the distributor. Returns
+  status of the crudest error or STATUS_OK, if there were no errors
 */
-int FileReader::read_sources(char **filenames, int *filename_offsets)
+uint8_t FileReader::read_sources(char **filenames, int *filename_offsets)
 {
   int i = 0;
+  uint8_t status = STATUS_OK;
   while(*filenames != NULL) {
     // Detect whether *filenames is a file or a directory
     struct stat fs;
     if (stat(*filenames, &fs) != 0) {
       ERROR("Can't access the file %s: %s\n", *filenames,
         strerror(errno));
-      return -1;
+      finish_task();
+      finish_work();
+      return STATUS_FATAL_DISK_ERROR;
     }
 
     if (S_ISDIR(fs.st_mode)) {
       // Recursive behaviour for directories
-      if (handle_directory_with_content(*filenames, &fs) != 0) {
-        return -1;
+      uint8_t result = handle_directory_with_content(*filenames, &fs);
+      if (result > status) {
+        status = result;
+        if (status >= STATUS_FIRST_FATAL_ERROR) {
+          finish_task();
+          finish_work();
+          return status;
+        }
       }
     } else if (S_ISREG(fs.st_mode)) {
       // *filenames should be already fixed up by the 
       // prepare_to_basename routine (mcp.cpp)
       char *basename;
       int basename_offset = filename_offsets[i];
-      if (basename_offset == 0 &&
+      if (basename_offset < 0 &&
           (basename = strrchr(*filenames, '/')) != NULL) {
         basename_offset = basename - *filenames + 1;
       }
-      if (handle_file(*filenames, &fs, basename_offset, true) != 0) {
-        return -1;
+      uint8_t result = handle_file(*filenames, &fs, basename_offset, true);
+      if (result > status) {
+        status = result;
+        if (status >= STATUS_FIRST_FATAL_ERROR) {
+          finish_task();
+          finish_work();
+          return status;
+        }
       }
     } else {
       ERROR("%s is not a regular file or directory\n", *filenames);
-      return -1;
+      finish_task();
+      finish_work();
+      return STATUS_FATAL_DISK_ERROR;
     }
     ++filenames;
     ++i;
   }
 
-  SDEBUG("All sources read, finish the task\n");
-  return finish_work();
+  DEBUG("All sources read (status: %u), finish the task\n", (unsigned)status);
+  return max(status, finish_work());
 }
 
 // Reads data from fd (till the end of file) and passes it to
@@ -115,8 +131,9 @@ int FileReader::read_from_file(int fd, off_t size)
 }
 
 // Reads the file 'filename' and pass it to the distributor
-int FileReader::handle_file(const char *filename, struct stat *statp,
-    int basename_offset, bool error_if_cant_open)
+// Returns status of the crudest error
+uint8_t FileReader::handle_file(const char *filename, struct stat *statp,
+  int basename_offset, bool error_if_cant_open)
 {
   /* Open the input file */
   int fd;
@@ -128,10 +145,10 @@ int FileReader::handle_file(const char *filename, struct stat *statp,
       DEBUG("Can't open the file %s: %s\n", filename, strerror(errno));
       register_error(STATUS_FATAL_DISK_ERROR,
         "Can't open the file %s: %s\n", filename, strerror(errno));
-      return -1;
+      return STATUS_FATAL_DISK_ERROR;
     } else {
       ERROR("Can't open the file %s: %s\n", filename, strerror(errno));
-      return 0;
+      return STATUS_NOT_FATAL_DISK_ERROR;
     }
   }
 
@@ -148,7 +165,7 @@ int FileReader::handle_file(const char *filename, struct stat *statp,
     DEBUG("Read error for the file %s: %s\n", filename, strerror(errno));
     register_error(STATUS_FATAL_DISK_ERROR, "Read error for the file %s: %s\n",
       filename, strerror(errno));
-    return -1;
+    return STATUS_FATAL_DISK_ERROR;
   }
   close(fd);
   uint8_t status = finish_task();
@@ -157,34 +174,33 @@ int FileReader::handle_file(const char *filename, struct stat *statp,
   if (status >= STATUS_FIRST_FATAL_ERROR) {
     // One of the writers finished with a fatal error
     finish_work();
-    return -1;
-  } else {
-    return 0;
   }
+  return status;
 }
 
 // Reads information about the directory 'dirname' and pass it to
 // the distributor
-int FileReader::handle_directory(char *dirname, struct stat *statp,
+uint8_t FileReader::handle_directory(char *dirname, struct stat *statp,
     int rootdir_basename_offset)
 {
   FileInfoHeader d_info(resource_is_a_directory,
     statp->st_mode & ~S_IFMT, strlen(dirname), rootdir_basename_offset, 0);
   add_task(d_info, dirname);
+  uint8_t status = finish_task();
   if (finish_task() >= STATUS_FIRST_FATAL_ERROR) {
     finish_work();
-    return -1;
   }
-  return 0;
+  return status;
 }
 
 // Implements recursive behavior for the directory 'name'.
 // Uses the handle_file and handle_directory functions.
-int FileReader::handle_directory_with_content(char *name,
+uint8_t FileReader::handle_directory_with_content(char *name,
     struct stat *statp)
 {
   DIR *dirp;
   struct dirent *dp;
+  uint8_t status;
 
   // Assume that there will be no slashes at the end of name
   int rootdir_basename_offset;
@@ -204,7 +220,13 @@ int FileReader::handle_directory_with_content(char *name,
   // Condition for the case if someone wish to copy the root directory
   if (*(name + rootdir_basename_offset) != '\0') {
     DEBUG("Send directory: %s\n", name + rootdir_basename_offset);
-    handle_directory(name, statp, rootdir_basename_offset);
+    uint8_t result = handle_directory(name, statp, rootdir_basename_offset);
+    if (result > status) {
+      status = result;
+      if (status >= STATUS_FIRST_FATAL_ERROR) {
+        return status;
+      }
+    }
     // to count one more slash
   } else {
     SDEBUG("Send the '/' directory\n");
@@ -245,16 +267,24 @@ int FileReader::handle_directory_with_content(char *name,
         continue;
       }
       if (S_ISDIR(tstat.st_mode)) {
-        DEBUG("Send directory: %s\n", path + rootdir_basename_offset);
-        if (handle_directory(path, statp, rootdir_basename_offset) != 0) {
-          return -1;
+        uint8_t result = handle_directory(path, statp, rootdir_basename_offset);
+        if (result > status) {
+          status = result;
+          if (status >= STATUS_FIRST_FATAL_ERROR) {
+            return status;
+          }
         }
         // add directory to the stack
         dirs.push(strdup(path));
       } else if (S_ISREG(tstat.st_mode)) {
         DEBUG("Send file: %s\n", path + rootdir_basename_offset);
-        if (handle_file(path, &tstat, rootdir_basename_offset, false) != 0) {
-          return -1;
+        uint8_t result = handle_file(path, &tstat, rootdir_basename_offset,
+          false);
+        if (result > status) {
+          status = result;
+          if (status >= STATUS_FIRST_FATAL_ERROR) {
+            return status;
+          }
         }
       } else {
         // Skip the object if it is not a regular file or directory
@@ -264,5 +294,5 @@ int FileReader::handle_directory_with_content(char *name,
     free(dirname);
     closedir(dirp);
   }
-  return 0;
+  return STATUS_OK;
 }
