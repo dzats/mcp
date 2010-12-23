@@ -123,7 +123,7 @@ public:
   ~MulticastSender()
   {
     if (sock != -1) { close(sock); }
-    if (send_queue != NULL) { delete send_queue; }
+    delete send_queue;
   }
 
   /*

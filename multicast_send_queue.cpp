@@ -63,9 +63,7 @@ MulticastSendQueue::~MulticastSendQueue()
   delete first_to_acknowledge;
   delete target_addresses;
   delete round_trip_times;
-  if (termination_message != NULL) {
-    delete termination_message;
-  }
+  delete termination_message;
 
   pthread_mutex_destroy(&mutex);
   pthread_cond_destroy(&space_ready_cond);
@@ -716,9 +714,7 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
 // Compose the session termination message and return it to the caller
 void *MulticastSendQueue::prepare_termination(uint32_t session_id)
 {
-  if (termination_message != NULL) {
-    delete termination_message;
-  }
+  delete termination_message;
   // Compose the termination message
   termination_message_size = sizeof(MulticastMessageHeader) +
     n_destinations * sizeof(uint32_t);

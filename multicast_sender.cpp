@@ -513,9 +513,7 @@ MulticastSender *MulticastSender::create_and_initialize(
         unsigned port_tries = 0;
         do {
           // Create the multicast sender
-          if (multicast_sender != NULL) {
-            delete multicast_sender;
-          }
+          delete multicast_sender;
           multicast_sender = new MulticastSender(reader, mode, multicast_port,
             n_sources, n_retransmissions, bandwidth);
           // Establish the multicast session
@@ -574,9 +572,7 @@ MulticastSender *MulticastSender::create_and_initialize(
     unsigned port_tries = 0;
     do {
       // Create the multicast sender
-      if (multicast_sender != NULL) {
-        delete multicast_sender;
-      }
+      delete multicast_sender;
       multicast_sender = new MulticastSender(reader,
         mode, multicast_port, n_sources, n_retransmissions, bandwidth);
       // Establish the multicast session
@@ -873,10 +869,7 @@ finish_session_initialization:
   target_address.sin_addr.s_addr = address;
   target_address.sin_port = htons(ephemeral_port);
 
-  if (send_queue != NULL) {
-    delete(send_queue);
-  }
-
+  delete send_queue;
   delete remaining_dst;
   sort(targets.begin(), targets.end());
   unsigned rtts[targets.size()];

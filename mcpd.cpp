@@ -987,9 +987,7 @@ int main(int argc, char **argv)
               // About this error will be reported later
               SDEBUG("Session initialization failed\n");
               unicast_receiver->send_errors(client_sock);
-              if (multicast_sender != NULL) {
-                delete multicast_sender;
-              }
+              delete multicast_sender;
               delete unicast_sender;
               delete unicast_receiver;
               if (!debug_mode) {
@@ -1002,7 +1000,7 @@ int main(int argc, char **argv)
         } catch (ConnectionException& e) {
           ERROR("Can't send a message to the immediate source: %s\n", e.what());
           // The TCP connection is broken.  All we can do, just silently exit.
-          if (multicast_sender != NULL) { delete multicast_sender; }
+          delete multicast_sender;
           delete unicast_sender;
           delete unicast_receiver;
 
@@ -1040,14 +1038,13 @@ int main(int argc, char **argv)
         }
   
         SDEBUG("Session finished, terminate the server\n");
-        if (remaining_dst != NULL &&
-            remaining_dst != &unicast_receiver->destinations) {
+        if (remaining_dst != &unicast_receiver->destinations) {
           delete remaining_dst;
         }
         delete file_writer;
         delete unicast_receiver;
-        if (unicast_sender != NULL) { delete unicast_sender; }
-        if (multicast_sender != NULL) { delete multicast_sender; }
+        delete unicast_sender;
+        delete multicast_sender;
         if (!debug_mode) {
           return unicast_receiver_session_result;
         } else {

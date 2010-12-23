@@ -557,7 +557,7 @@ int main(int argc, char **argv)
             delete multicast_sender;
             multicast_sender = NULL;
           }
-          if (remaining_dst != NULL && remaining_dst != &dst) {
+          if (remaining_dst != &dst) {
             delete remaining_dst;
           }
           remaining_dst = NULL;
@@ -657,15 +657,12 @@ int main(int argc, char **argv)
     }
 
     SDEBUG("Finished, clean up the data\n");
-    if (multicast_sender != NULL) {
-      delete multicast_sender;
-      multicast_sender = NULL;
-    }
-    if (unicast_sender != NULL) {
-      delete unicast_sender;
-      unicast_sender = NULL;
-    }
-    if (remaining_dst != NULL && remaining_dst != &dst) {
+    delete multicast_sender;
+    multicast_sender = NULL;
+    delete unicast_sender;
+    unicast_sender = NULL;
+
+    if (remaining_dst != &dst) {
       delete remaining_dst;
     }
 
