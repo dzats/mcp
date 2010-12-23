@@ -55,7 +55,7 @@ void Distributor::SimpleError::send(int sock)
       sendn(sock, message, message_length, 0);
     }
   } catch (ConnectionException& e) {
-    ERROR("Can't send error to the source: %s\n", e.what());
+    ERROR("Can't send an error to the source: %s\n", e.what());
   }
 }
 
@@ -143,7 +143,8 @@ void Distributor::FileRetransRequest::send(int sock)
     sendn(sock, &h, sizeof(h), 0);
     sendn(sock, message, message_length, 0);
   } catch (ConnectionException& e) {
-    ERROR("Can't file retransmission request to the source: %s\n", e.what());
+    ERROR("Can't send a file retransmission request to the source: %s\n",
+      e.what());
   }
   free(message);
 }

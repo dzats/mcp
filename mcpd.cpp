@@ -361,6 +361,10 @@ int main(int argc, char **argv)
   }
   homedir = strdup(homedir);
 
+#ifdef NDEBUG
+  openlog(argv[0], LOG_PID, LOG_DAEMON);
+#endif
+
   // Set speed for the pseudo-random numbers
   struct timeval tv;
   gettimeofday(&tv, NULL);
@@ -647,7 +651,11 @@ int main(int argc, char **argv)
 
   // Become a daemon process and proceeed to the home directory
   if (!debug_mode) {
+#ifdef NDEBUG
     daemon(1, 0);
+#else
+    daemon(1, 1);
+#endif
   }
 
   // Start the multicast receiver

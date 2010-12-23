@@ -234,6 +234,10 @@ int main(int argc, char **argv)
   uint32_t multicast_interface = INADDR_NONE; // Interface that will be used
     // for global multicast traffic
 
+#ifdef NDEBUG
+  openlog(argv[0], LOG_PERROR | LOG_PID, LOG_DAEMON);
+#endif
+
   // Set speed for the pseudo-random numbers
   struct timeval tv;
   gettimeofday(&tv, NULL);

@@ -333,7 +333,7 @@ int UnicastReceiver::session_init(int s)
       }
     } while(!is_initialization_finished);
   } catch (std::exception& e) {
-    DEBUG("Network error during session initialization: %s\n", e.what());
+    ERROR("Network error during session initialization: %s\n", e.what());
     register_error(STATUS_UNICAST_INIT_ERROR,
       "Network error during session initialization: %s\n", e.what());
     return -1;
@@ -434,7 +434,7 @@ int UnicastReceiver::session()
         }
       }
     } catch(ConnectionException& e) {
-      DEBUG("Network error during transmission: %s\n", e.what());
+      ERROR("Network error during transmission: %s\n", e.what());
       checksum.final();
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Network error during transmission: %s\n", e.what());
