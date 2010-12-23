@@ -381,6 +381,7 @@ int UnicastReceiver::session()
       }
     } catch(ConnectionException& e) {
       DEBUG("Network error during transmission: %s\n", e.what());
+      checksum.final();
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Network error during transmission: %s\n", e.what());
       errors.send(sock);
