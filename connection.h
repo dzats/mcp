@@ -102,6 +102,61 @@
 #define VERIFY_CHECKSUMS_TWISE_FLAG 4
 
 /*
+  Helper functions to work with the monotonically increased unsigned numbers
+*/
+static inline bool cyclic_less(uint32_t a, uint32_t b)
+{
+  register uint32_t d = b - a;
+  return d != 0 && d < INT32_MAX ? true : false;
+}
+
+static inline bool cyclic_greater(uint32_t a, uint32_t b)
+{
+  register uint32_t d = a - b;
+  return d != 0 && d < INT32_MAX ? true : false;
+}
+
+static inline bool cyclic_greater_or_equal(uint32_t a, uint32_t b)
+{
+  return a - b < INT32_MAX;
+}
+
+static inline bool cyclic_less_or_equal(uint32_t a, uint32_t b)
+{
+  return b - a < INT32_MAX;
+}
+
+static inline uint64_t hton64(uint64_t arg)
+{
+#ifdef linux
+#if __BYTE_ORDER == __BIG_ENDIAN
+  return arg;
+#elif __BYTE_ORDER == __LITTLE_ENDIAN
+  return bswap_64(arg);
+#else
+#error Unknown byte order
+#endif
+#else
+  return htobe64(arg);
+#endif
+}
+
+static inline uint64_t ntoh64(uint64_t arg)
+{
+#ifdef linux
+#if __BYTE_ORDER == __BIG_ENDIAN
+  return arg;
+#elif __BYTE_ORDER == __LITTLE_ENDIAN
+  return bswap_64(arg);
+#else
+#error Unknown byte order
+#endif
+#else
+  return be64toh(arg);
+#endif
+}
+
+/*
   Data structures
 */
 // Unicast session initialization header
@@ -200,12 +255,12 @@ struct FileInfoHeader
 {
 private:
   uint8_t unused; // temporary unused field
-  uint8_t type;
-  uint16_t mode;
+  uint8_t type; // enum ResourceType
+  uint16_t mode; // Unix file mode
   uint16_t name_length; // length of the file/directory name
   uint16_t name_offset; // offset of the common (not source specifid) part
     // in the file/directory name
-  uint32_t file_size[2]; // size of file
+  uint64_t file_size; // size of file
 public:
   FileInfoHeader() : unused(0), name_length(0) {}
   FileInfoHeader(uint8_t t, uint16_t mode, uint16_t name_length,
@@ -214,8 +269,7 @@ public:
     this->mode = htons(mode);
     this->name_length = htons(name_length);
     this->name_offset = htons(name_offset);
-    this->file_size[0] = htonl(file_size & UINT32_MAX); 
-    this->file_size[1] = htonl(file_size >> 32); 
+    this->file_size = hton64(file_size);
   }
 
   uint8_t get_type() const
@@ -236,7 +290,7 @@ public:
   }
   uint64_t get_file_size() const
   {
-    return ((uint64_t)ntohl(file_size[1]) << 32) + ntohl(file_size[0]);
+    return ntoh64(file_size);
   }
   bool is_trailing_record() const
   {
@@ -322,61 +376,6 @@ public:
   }
   uint32_t get_ephemeral_address() const { return ntohl(ephemeral_address); }
 } __attribute__((packed));
-
-/*
-  Helper functions to work with the monotonically increased unsigned numbers
-*/
-static inline bool cyclic_less(uint32_t a, uint32_t b)
-{
-  register uint32_t d = b - a;
-  return d != 0 && d < INT32_MAX ? true : false;
-}
-
-static inline bool cyclic_greater(uint32_t a, uint32_t b)
-{
-  register uint32_t d = a - b;
-  return d != 0 && d < INT32_MAX ? true : false;
-}
-
-static inline bool cyclic_greater_or_equal(uint32_t a, uint32_t b)
-{
-  return a - b < INT32_MAX;
-}
-
-static inline bool cyclic_less_or_equal(uint32_t a, uint32_t b)
-{
-  return b - a < INT32_MAX;
-}
-
-static inline uint64_t hton64(uint64_t arg)
-{
-#ifdef linux
-#if __BYTE_ORDER == __BIG_ENDIAN
-  return arg;
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-  return bswap_64(arg);
-#else
-#error Unknown byte order
-#endif
-#else
-  return htobe64(arg);
-#endif
-}
-
-static inline uint64_t ntoh64(uint64_t arg)
-{
-#ifdef linux
-#if __BYTE_ORDER == __BIG_ENDIAN
-  return arg;
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-  return bswap_64(arg);
-#else
-#error Unknown byte order
-#endif
-#else
-  return be64toh(arg);
-#endif
-}
 
 // Internal function to inmplement a more precise usleep on FreeBSD
 void internal_usleep(unsigned udelay);
