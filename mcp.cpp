@@ -515,25 +515,9 @@ int main(int argc, char **argv)
       if (remaining_dst == NULL) {
         // Some error occurred during the multicast sender initialization
         SDEBUG("Initialization of the multicast sender failed.\n");
-        if (source_reader->is_unrecoverable_error_occurred()) {
-          source_reader->display_errors();
-          delete source_reader;
-          exit(EXIT_FAILURE);
-        } else {
-          if (source_reader->is_server_busy()) {
-            DEBUG("Will try to connect again after %u microseconds\n", 
-              1000000 * RECONNECTION_TIMEOUT +
-              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-              ((float)rand()/RAND_MAX)));
-            usleep(1000000 * RECONNECTION_TIMEOUT +
-              unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
-              ((float)rand()/RAND_MAX)));
-          }
-          delete source_reader;
-          // FIXME: add limitation to the muximum time a client can wait
-          // till some server is busy.
-          goto try_to_connect_again;
-        }
+        source_reader->display_errors();
+        delete source_reader;
+        exit(EXIT_FAILURE);
       }
       if (is_multicast_only && remaining_dst->size() != 0) {
         char *hosts = (char *)strdup("");

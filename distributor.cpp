@@ -26,7 +26,8 @@ void Distributor::SimpleError::display() const
       ERROR("Server %s is busy\n",
         inet_ntop(AF_INET, &addr, host, sizeof(host)));
     } else {
-      ERROR("Error %u received from %s\n", status,
+      ERROR("Error %u(%s) received from %s\n", status,
+        get_reply_status_description(status),
         inet_ntop(AF_INET, &addr, host, sizeof(host)));
     }
   } else {

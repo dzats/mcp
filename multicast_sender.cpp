@@ -484,7 +484,7 @@ MulticastSender *MulticastSender::create_and_initialize(
               local_addresses[i] == all_destinations[j].addr) {
             char dest_name[INET_ADDRSTRLEN];
             uint32_t dest_addr = ntohl(all_destinations[j].addr);
-            ERROR("Can't use multicast transfer for local destination: %s\n",
+            ERROR("Can't use multicast transfer for localhost: %s\n",
               inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
             return NULL;
           }
@@ -508,18 +508,26 @@ MulticastSender *MulticastSender::create_and_initialize(
       if (local_destinations.size() > 0)
 #endif
       {
-        multicast_sender = new MulticastSender(reader, mode, multicast_port,
-          n_sources, n_retransmissions, bandwidth);
-        // Establish the multicast session
-        const vector<Destination> *si_result;
-        si_result = multicast_sender->session_init(local_addresses[i],
-          local_destinations, n_sources, use_global_multicast,
-          use_fixed_rate_multicast);
-        if (si_result == NULL) {
+        int si_result;
+        unsigned port_tries = 0;
+        do {
+          // Create the multicast sender
+          if (multicast_sender != NULL) {
+            delete multicast_sender;
+          }
+          multicast_sender = new MulticastSender(reader, mode, multicast_port,
+            n_sources, n_retransmissions, bandwidth);
+          // Establish the multicast session
+          si_result = multicast_sender->session_init(local_addresses[i],
+            local_destinations, use_global_multicast, use_fixed_rate_multicast);
+          ++port_tries;
+        } while(si_result == STATUS_PORT_IN_USE &&
+            port_tries <= MAX_REMOTE_PORT_TRIES);
+        if (si_result != 0) {
           // A fatal error occurred
           delete multicast_sender;
           return NULL;
-        } else if (si_result->size() == 0) {
+        } else if (multicast_sender->targets.size() == 0) {
           // No connection has been established
           delete multicast_sender;
           continue;
@@ -528,15 +536,16 @@ MulticastSender *MulticastSender::create_and_initialize(
           // TODO: close the connection here if there are not many such
           // hosts
           vector<Destination> *new_dst = new vector<Destination>;
-          if (si_result->size() > 0) {
+          if (multicast_sender->targets.size() > 0) {
             DEBUG("%zu hosts connected:\n",
-              si_result->size());
+              multicast_sender->targets.size());
             for (vector<Destination>::const_iterator i =
               all_destinations.begin();
                 i != all_destinations.end(); ++i) {
               vector<Destination>::const_iterator j = lower_bound(
-                si_result->begin(), si_result->end(), *i);
-              if (j == si_result->end() || *j != *i) {
+                multicast_sender->targets.begin(),
+                multicast_sender->targets.end(), *i);
+              if (j == multicast_sender->targets.end() || *j != *i) {
                 new_dst->push_back(*i);
               }
 #ifndef NDEBUG
@@ -560,18 +569,26 @@ MulticastSender *MulticastSender::create_and_initialize(
     }
   } else if (all_destinations.size() > 2 || is_multicast_only) {
     // Use global multicast
-    multicast_sender = new MulticastSender(reader,
-      mode, multicast_port, n_sources, n_retransmissions, bandwidth);
-    // Establish the multicast session
-    const vector<Destination> *si_result;
-    si_result = multicast_sender->session_init(multicast_interface,
-      all_destinations, n_sources, use_global_multicast,
-      use_fixed_rate_multicast);
-    if (si_result == NULL) {
+    int si_result;
+    unsigned port_tries = 0;
+    do {
+      // Create the multicast sender
+      if (multicast_sender != NULL) {
+        delete multicast_sender;
+      }
+      multicast_sender = new MulticastSender(reader,
+        mode, multicast_port, n_sources, n_retransmissions, bandwidth);
+      // Establish the multicast session
+      si_result = multicast_sender->session_init(multicast_interface,
+        all_destinations, use_global_multicast, use_fixed_rate_multicast);
+      ++port_tries;
+    } while(si_result == STATUS_PORT_IN_USE &&
+        port_tries <= MAX_REMOTE_PORT_TRIES);
+    if (si_result != 0) {
       // A fatal error occurred
       delete multicast_sender;
       return NULL;
-    } else if (si_result->size() == 0) {
+    } else if (multicast_sender->targets.size() == 0) {
       // No connection has been established
       delete multicast_sender;
       *remaining_dst = &all_destinations;
@@ -579,14 +596,15 @@ MulticastSender *MulticastSender::create_and_initialize(
     } else {
       // Multicast connection has been established with some hosts
       vector<Destination> *new_dst = new vector<Destination>;
-      if (si_result->size() > 0) {
+      if (multicast_sender->targets.size() > 0) {
         DEBUG("%zu hosts connected:\n",
-          si_result->size());
+          multicast_sender->targets.size());
         for (vector<Destination>::const_iterator i = all_destinations.begin();
             i != all_destinations.end(); ++i) {
           vector<Destination>::const_iterator j = lower_bound(
-            si_result->begin(), si_result->end(), *i);
-          if (j == si_result->end() || *j != *i) {
+            multicast_sender->targets.begin(),
+            multicast_sender->targets.end(), *i);
+          if (j == multicast_sender->targets.end() || *j != *i) {
             new_dst->push_back(*i);
           }
 #ifndef NDEBUG
@@ -613,13 +631,13 @@ MulticastSender *MulticastSender::create_and_initialize(
 
 /*
   This initialization routine tries to establish a multicast
-  session with the destinations specified in dst. The return value
-  is a vector of destinations the connection has been established with.
+  session with the destinations specified in dst.
+  The return value is 0 on success, -1 in the case of local error and
+  error status received in the reply if some remote error occurred.
 */
-const std::vector<Destination>* MulticastSender::session_init(
+int MulticastSender::session_init(
     uint32_t local_addr,
     const std::vector<Destination>& dst,
-    int n_sources,
     bool use_global_multicast,
     bool use_fixed_rate_multicast)
 {
@@ -642,7 +660,7 @@ const std::vector<Destination>* MulticastSender::session_init(
     ERROR("Can't create a UDP socket: %s\n", strerror(errno));
     register_error(STATUS_UNKNOWN_ERROR, "Can't create a UDP socket: %s",
       strerror(errno));
-    return NULL;
+    return -1;
   }
 
   // Choose an ephemeral UDP port
@@ -652,7 +670,7 @@ const std::vector<Destination>* MulticastSender::session_init(
     ERROR("Can't choose an ephemeral port: %s\n", strerror(errno));
     register_error(STATUS_UNKNOWN_ERROR,
       "Can't choose an ephemeral port: %s", strerror(errno));
-    return NULL;
+    return -1;
   }
   DEBUG("Ephemeral port for the new connection is: %u\n", ephemeral_port);
 
@@ -816,7 +834,7 @@ const std::vector<Destination>* MulticastSender::session_init(
                 target_address.sin_port = htons(ephemeral_port);
                 sort(targets.begin(), targets.end());
                 abnormal_termination();
-                return NULL;
+                return rh->get_status();
               }
             }
           } else {
@@ -830,7 +848,7 @@ const std::vector<Destination>* MulticastSender::session_init(
           ERROR("poll error: %s\n", strerror(errno));
           register_error(STATUS_UNKNOWN_ERROR, "poll error: %s",
             strerror(errno));
-          return NULL;
+          return -1;
         }
       } while(1);
       // Finish procedure if there were no replies for two successive
@@ -845,7 +863,7 @@ const std::vector<Destination>* MulticastSender::session_init(
     DEBUG("Can't send a UDP datagram: %s\n", e.what());
     register_error(STATUS_MULTICAST_INIT_ERROR,
       "Can't send a UDP datagram: %s", e.what());
-    return NULL;
+    return -1;
   }
 
 finish_session_initialization:
@@ -866,7 +884,7 @@ finish_session_initialization:
   }
   send_queue = new MulticastSendQueue(targets, rtts, use_fixed_rate_multicast);
 
-  return &targets;
+  return 0;
 }
 
 /*

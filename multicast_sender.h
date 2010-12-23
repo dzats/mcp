@@ -60,6 +60,9 @@ private:
     // MULTICAST_TERMINATION_REQUEST message
   static const unsigned MAX_PORT_CHOOSING_TRIES = 100;
   static const unsigned EPHEMERAL_PORT_CHOOSING_STEP = 111;
+  static const unsigned MAX_REMOTE_PORT_TRIES = 11; // Maximum amount of
+    // attempts to initialize a multicast session when some of the destinations
+    // returns STATUS_PORT_IN_USE.
 
   Mode mode; // Whether the UnicastSender object is used by the client (mcp)
     // tool or by the server mcpd tool
@@ -145,13 +148,13 @@ public:
 
   /*
     This initialization routine tries to establish a multicast
-    session with the destinations specified in dst. The return value
-    is a vector of destinations the connection has been established with.
+    session with the destinations specified in dst.
+    The return value is 0 on success, -1 in the case of local error and
+    error status received in the reply if some remote error occurred.
   */
-  const std::vector<Destination>* session_init(
+  int session_init(
     uint32_t local_addr,
     const std::vector<Destination>& dst,
-    int n_sources,
     bool use_global_multicast,
     bool use_fixed_rate_multicast);
 
