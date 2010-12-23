@@ -580,7 +580,8 @@ int MulticastReceiver::session()
   // Start the read_messages routine in a separate thread
   int error;
   pthread_t read_messages_thread;
-  error = pthread_create(&read_messages_thread, NULL, read_messages_wrapper, this);
+  error = pthread_create(&read_messages_thread, NULL, read_messages_wrapper,
+    this);
   if (error != 0) {
     ERROR("Can't create a new thread: %s\n", strerror(error));
     return EXIT_FAILURE;

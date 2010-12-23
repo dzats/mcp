@@ -56,9 +56,12 @@ uint8_t FileReader::read_sources(char **filenames, int *filename_offsets)
       // prepare_to_basename routine (mcp.cpp)
       char *basename;
       int basename_offset = filename_offsets[i];
-      if (basename_offset < 0 &&
-          (basename = strrchr(*filenames, '/')) != NULL) {
-        basename_offset = basename - *filenames + 1;
+      if (basename_offset < 0) {
+        if ((basename = strrchr(*filenames, '/')) != NULL) {
+          basename_offset = basename - *filenames + 1;
+        } else {
+          basename_offset = 0;
+        }
       }
       uint8_t result = handle_file(*filenames, &fs, basename_offset, true);
       if (result > status) {
