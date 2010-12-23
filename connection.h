@@ -31,7 +31,9 @@
 #endif
 
 // Some configurational constants
-#define UNICAST_PORT 6879 // default UDP port used for the connection
+#define UNICAST_PORT 6879 // default TCP port used for the unicast connections
+#define MULTICAST_PORT 6879 // default UDP port used for the multicast
+	// connections
 #define MAX_ERROR_LENGTH 256 // max length of the error messages
 #define DEFAULT_MULTICAST_ADDR "224.0.0.78"
 #define MULTICAST_UNEXISTING_RESPONDER 0xFFFFFFFF

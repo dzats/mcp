@@ -13,24 +13,21 @@ reader.o \
 unicast_receiver.o \
 unicast_sender.o \
 multicast_sender.o \
+multicast_send_queue.o \
+multicast_receiver.o \
+multicast_recv_queue.o \
 file_writer.o \
 path.o \
 distributor.o \
-connection.o \
-multicast_send_queue.o
-MULTICAST_RECEIVER_OBJECTS = multicast_receiver.o \
-connection.o \
-path.o \
-md5.o \
-multicast_recv_queue.o
+connection.o
 
-DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d) \
-$(MULTICAST_RECEIVER_OBJECTS:.o=.d)
+DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d)
+
 
 #CXXFLAGS += -ggdb -Wall
 CXXFLAGS += -DNDEBUG -O2
 
-PROGRAMS = mcp mcpd multicast_receiver
+PROGRAMS = mcp mcpd
 
 all: $(PROGRAMS)
 
@@ -40,16 +37,12 @@ mcp: $(MCP_OBJECTS)
 mcpd: $(MCPD_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
 
-multicast_receiver: $(MULTICAST_RECEIVER_OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
-
 sinclude $(DEP_FILES)
 
 %.d:%.cpp
 	@$(CXX) -MM $< >$@
 
 clean:
-	rm -f $(PROGRAMS) $(MCP_OBJECTS) $(MCPD_OBJECTS) $(MULTICAST_RECEIVER_OBJECTS) \
-$(DEP_FILES)
+	rm -f $(PROGRAMS) $(MCP_OBJECTS) $(MCPD_OBJECTS) $(DEP_FILES)
 
 .PHONY: clean

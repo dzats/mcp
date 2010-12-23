@@ -38,7 +38,7 @@ class MulticastSender : public Distributor::Writer {
 
 	uint32_t nsources; // number of the specified sources, used to detect
 		// the target path
-	vector<Destination> targets;
+	std::vector<Destination> targets;
 public:
 
 	MulticastSender(Distributor* b, uint16_t p, uint32_t n_sources) :
