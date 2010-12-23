@@ -487,7 +487,7 @@ int main(int argc, char **argv)
 #endif
 
 #ifndef NDEBUG
-    SDEBUG("Destinations:\n");
+    DEBUG("Destinations (%zu): \n", dst.size());
     for (vector<Destination>::const_iterator i = dst.begin();
         i != dst.end(); ++i) {
       char saddr[INET_ADDRSTRLEN];
