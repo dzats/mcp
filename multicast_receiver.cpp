@@ -443,12 +443,6 @@ void MulticastReceiver::read_messages()
       }
 #endif
 
-#if 0
-    if(rand() % 17 == 1) {
-      SDEBUG("Skip the message (for debugging purpose)\n");
-      continue;
-    }
-#endif
       // Check the session id and the source address
       if (client_addr.sin_addr.s_addr != source_addr.sin_addr.s_addr ||
           mmh->get_session_id() != session_id) {
@@ -461,13 +455,6 @@ void MulticastReceiver::read_messages()
         // Remove the corresponding pendinig error
         DEBUG("Conformation for the error message: %d\n", mmh->get_number());
         error_queue.remove(mmh->get_number());
-#if 0
-        if (error_queue.remove(mmh->get_number()) >= STATUS_FIRST_FATAL_ERROR) {
-          // Reply to a fatal error received, finish the multicast sender
-          SDEBUG("Finish the multicast sender\n");
-          pthread_exit(NULL);
-        }
-#endif
         continue;
       }
 
@@ -822,12 +809,6 @@ int MulticastReceiver::session()
         }
         checksum.final();
         if (length >= sizeof(*mmh) + sizeof(checksum.signature)) {
-#if 0
-          // Change checksum for debugging purposes
-          if (rand() % 20 == 0) {
-            *(uint8_t *)(mmh + 1) = '\0';
-          }
-#endif
 
 #ifndef NDEBUG
           SDEBUG("Calculated checksum: ");
