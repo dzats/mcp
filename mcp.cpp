@@ -62,17 +62,19 @@ void usage_and_exit(char *name)
   "\t\tTry to establish multicast connection with all the destinations,\n"
   "\t\tnot only the link-local ones. Use the specified interface for\n"
   "\t\tfor multicast traffic.\n\n"
-  "\t-c\tVerify the file checksums twise. The second verification is\n"
-  "\t\tperformed on data written to the disk.\n\n"
+  "\t-c\tTells receivers to verify the file checksums twice.\n"
+  "\t\tThe second verification performed when all the file data\n"
+  "\t\thas been written to the disk. This option has no effect\n"
+  "\t\tfor the multicast transfer mode.\n\n"
   "\t-b value\n"
   "\t\tSet per-sender bandwidth limit (suffix 'm' - megabits/second,\n"
   "\t\tsuffix 'M' - megabytes/second, without suffix - bytes/second).\n\n"
   "\t-f rate\n"
-  "\t\tSet fixed-rate mode for the multicast transfert.  Rate is\n"
+  "\t\tSet fixed-rate mode for the multicast transfer. Rate is\n"
   "\t\tspecified in bytes/second (suffix 'm' - megabits/second,\n"
   "\t\tsuffix 'M' - megabytes/second).\n\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
-  "\t\ttransfert.\n");
+  "\t\ttransfer.\n");
   exit(EXIT_FAILURE);
 }
 
