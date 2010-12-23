@@ -170,7 +170,9 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
   }
 
   // Delay the response for some time
-  // FIXME: such delay will blocks the server for some time
+  // FIXME: Such delay will blocks the server for some time.
+  // FIXME: Precision of usleep can be not enough. (it depends
+  // on the tick length)
   if (delay > 0) {
     usleep(delay);
   }

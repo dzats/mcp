@@ -453,7 +453,7 @@ MulticastSender *MulticastSender::create_and_initialize(
         // hosts
         vector<Destination> *new_dst = new vector<Destination>;
         if (si_result->size() > 0) {
-          DEBUG("(%zu) hosts connected:\n",
+          DEBUG("%zu hosts connected:\n",
             si_result->size());
           for (vector<Destination>::const_iterator i = all_destinations.begin();
               i != all_destinations.end(); ++i) {
@@ -546,8 +546,8 @@ const std::vector<Destination>* MulticastSender::session_init(
   pfds.fd = sock;
   pfds.events = POLLIN;
 
-  int replies_before = -1;
-  int replies_now;
+  unsigned n_unreplied_init_requests = 0;
+  unsigned replies_now;
   // Send the session initialization message MAX_INITIALIZATION_RETRIES times
   // or unil there will be no replies by two successive session initialization
   // messages
@@ -592,6 +592,7 @@ const std::vector<Destination>* MulticastSender::session_init(
           } else {
             DEBUG("Received reply of length %d\n", length);
             ++replies_now;
+            n_unreplied_init_requests = 0;
             // Parse the reply message and remove the received destinations
             uint32_t *p = (uint32_t *)(mih + 1);
             uint32_t *end = (uint32_t* )(buffer + length);
@@ -646,13 +647,11 @@ const std::vector<Destination>* MulticastSender::session_init(
       } while(1);
       // Finish procedure if there were no replies for two successive
       // retransmissions (for speed up reasons)
-      if (replies_now == 0 && replies_before == 0) {
-        break;
-      } else {
-        // TODO: correct the transmission rate using the number of replies
-        // received
-      }
-      replies_before = replies_now;
+      if (replies_now == 0) { ++n_unreplied_init_requests; }
+      if (n_unreplied_init_requests >= MAX_UNREPLID_INIT_RETRIES) { break; }
+
+      // TODO: correct the transmission rate using the number of replies
+      // received
     }
   } catch (ConnectionException& e) {
     DEBUG("Can't send a UDP datagram: %s\n", e.what());

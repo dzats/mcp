@@ -43,6 +43,7 @@ private:
   };
 
   static const unsigned MAX_INITIALIZATION_RETRIES = 9;
+  static const unsigned MAX_UNREPLID_INIT_RETRIES = 3;
   static const unsigned MAX_ABNORMAL_TERMINATION_RETRIES = 3;
   static const unsigned INIT_RETRANSMISSION_RATE = 200000; // rate for the
     // session initialization message (in microseconds)
