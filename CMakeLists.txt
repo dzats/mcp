@@ -1,5 +1,7 @@
 PROJECT( mcp )
 
+  cmake_minimum_required(VERSION 2.6)
+
   SET(mcp_sources
     mcp.cpp
     file_reader.cpp)
@@ -11,8 +13,6 @@ PROJECT( mcp )
     multicast_error_queue.cpp
     multicast_receiver.cpp
     multicast_recv_queue.cpp
-    multicast_send_queue.cpp
-    multicast_sender.cpp
     path.cpp
     unicast_receiver.cpp)
 

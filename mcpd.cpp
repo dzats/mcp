@@ -41,7 +41,7 @@ struct MulticastConnection {
   uint32_t source; // Source of the multicast connection
   uint32_t session_id; // Session id of the multicast connection
   pid_t pid; // PID of the process handling the 
-  mutable bool is_in_time_wait; // Whether this connection is in the
+  bool is_in_time_wait; // Whether this connection is in the
     // time wait state
   MulticastConnection(uint32_t src, uint32_t sid, pid_t p) : source(src),
     session_id(sid), pid(p), is_in_time_wait(false) {}
@@ -188,8 +188,11 @@ void sigusr1_sigaction(int signum, siginfo_t *info, void *uap)
   set<MulticastConnection>::iterator i = find_if(multicast_sessions.begin(),
     multicast_sessions.end(), MulticastConnectionPidCompare(info->si_pid));
   if (i != multicast_sessions.end()) {
+    MulticastConnection mc = *i;
+    multicast_sessions.erase(i++);
+    mc.is_in_time_wait = true;
+    multicast_sessions.insert(i, mc);
     DEBUG("Process %u entered to the time wait state\n", info->si_pid);
-    i->is_in_time_wait = true;
     --n_connections;
   }
 
@@ -626,11 +629,16 @@ int main(int argc, char **argv)
 
   // Become a daemon process and proceeed to the home directory
   if (!debug_mode) {
+    int daemon_result;
 #ifdef NDEBUG
-    daemon(1, 0);
+    daemon_result = daemon(1, 0);
 #else
-    daemon(1, 1);
+    daemon_result = daemon(1, 1);
 #endif
+    if (daemon_result != 0) {
+      ERROR("daemon(3) error: %s\n", strerror(errno));
+      exit(EXIT_FAILURE);
+    }
   }
 
   // Start the multicast receiver

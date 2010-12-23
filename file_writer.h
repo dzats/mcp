@@ -8,7 +8,7 @@
 #include "path.h"
 
 // Class that writes files and directories to the disk
-class FileWriter : public Writer
+class FileWriter : private Writer
 {
   static const size_t FILE_READ_BUFFER_SIZE = 65536;
 

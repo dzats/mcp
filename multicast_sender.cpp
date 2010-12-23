@@ -726,9 +726,9 @@ int MulticastSender::session_init(
 
   unsigned n_unreplied_init_requests = 0;
   unsigned replies_now;
-  // Send the session initialization message MAX_INITIALIZATION_RETRIES times
-  // or unil there will be no replies by two successive session initialization
-  // messages
+  // Send the session initialization message up to MAX_INITIALIZATION_RETRIES
+  // times or unil there will be no replies by two successive session
+  // initialization messages
   try {
     for(unsigned i = 0; i < MAX_INITIALIZATION_RETRIES; ++i) {
       mmh->set_number(i);
@@ -853,7 +853,7 @@ int MulticastSender::session_init(
       // Finish procedure if there were no replies for two successive
       // retransmissions (for speed up reasons)
       if (replies_now == 0) { ++n_unreplied_init_requests; }
-      if (n_unreplied_init_requests >= MAX_UNREPLID_INIT_RETRIES) { break; }
+      if (n_unreplied_init_requests > MAX_UNREPLID_INIT_RETRIES) { break; }
 
       // TODO: correct the transmission rate using the number of replies
       // received

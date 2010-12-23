@@ -15,7 +15,7 @@
 #include "multicast_send_queue.h"
 
 // Objects that sends files to the multicast destinations
-class MulticastSender : public Writer
+class MulticastSender : private Writer
 {
 public:
   enum Mode {server_mode, client_mode};
@@ -100,7 +100,6 @@ private:
   uint32_t n_sources; // number of the specified sources, used to detect
     // the target path
   std::vector<Destination> targets;
-public:
 
   MulticastSender(Reader* b, Mode m, uint16_t p, uint32_t n_sources,
       unsigned n_retrans, unsigned bw) :
@@ -120,6 +119,20 @@ public:
     total_bytes_sent = 0; // Total number of bytes that have been send
 #endif
   }
+
+  /*
+    This initialization routine tries to establish a multicast
+    session with the destinations specified in dst.
+    The return value is 0 on success, -1 in the case of local error and
+    error status received in the reply if some remote error occurred.
+  */
+  int session_init(
+    uint32_t local_addr,
+    const std::vector<Destination>& dst,
+    bool use_global_multicast,
+    bool use_fixed_rate_multicast);
+public:
+
   ~MulticastSender()
   {
     if (sock != -1) { close(sock); }
@@ -145,18 +158,6 @@ public:
     unsigned bandwidth,
     bool use_fixed_rate_multicast,
     unsigned n_retransmissions);
-
-  /*
-    This initialization routine tries to establish a multicast
-    session with the destinations specified in dst.
-    The return value is 0 on success, -1 in the case of local error and
-    error status received in the reply if some remote error occurred.
-  */
-  int session_init(
-    uint32_t local_addr,
-    const std::vector<Destination>& dst,
-    bool use_global_multicast,
-    bool use_fixed_rate_multicast);
 
   /*
     This is the main routine of the multicast sender. It sends

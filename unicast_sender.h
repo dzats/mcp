@@ -10,7 +10,7 @@
 #include "connection.h"
 
 // Objects that sends files to the next unicast destination in the pipe
-class UnicastSender : public Writer
+class UnicastSender : private Writer
 {
 public:
   enum Mode {server_mode, client_mode};

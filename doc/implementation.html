@@ -1,0 +1,439 @@
+<html>
+<head>
+<title>MCP Implementation notes</title>
+<meta http-equiv="Content-type" content="text/html; charset=utf-8"/>
+<link rel="stylesheet" type="text/css" media="all" href="mcpdoc.css"/>
+</head>
+<body>
+<h1>MCP Implementation Notes</h1>
+<ol>
+  <li><a href="#intro">Introduction</a>
+  <li><a href="#build">Build Instructions</a>
+  <li><a href="#classes">Main Classes</a>
+  <li><a href="#synchronization">Synchronization</a>
+  <li><a href="#unicast">Unicast Transfer</a>
+    <ol>
+      <li><a href="#unicast_init">Unicast Session Initialization</a>
+      <li><a href="#unicast_session">Unicast Session</a>
+    </ol>
+  <li><a href="#multicast">Multicast Transfer</a>
+  <li><a href="#security">Security Considerations</a>
+</ol>
+  <h3 class="gr">other documnets</h3>
+<ol>
+  <li><a href="overview.html">Обзор утилиты mcp</a>
+</ol>
+<h2 id="intro">Introduction</h2>
+<p>
+mcp is a relatively simple tool to copy a bunch of files to
+several destinations. Each destination shall have the mcpd daemon running. mcp
+uses TCP and (multicast) UDP as underlying protocols. By default, it tries to
+automatically detect the best route for the transfer and can combine multicast
+UDP transfer and TCP transfer (for destinations inaccessible through UDP
+multicast).
+</p>
+<p>
+The route is chosen by the following algorithm. At first, mcp tries to establish
+a multicast connection with all the multicast reachable destinations. If there are
+some destinations left, mcp establishes a unicast (TCP) connection with one of
+them and sends a list of the remaining destinations to it. This destination
+(mcpd) then behaves much like the sending mcp. It tries to establish the
+multicast connection with received destinations, then it establishes a unicast
+connection with one of the remaining ones (if any). Picture 1 illustrates a
+possible route for nine destinations.
+</p>
+<table>
+<tr><td>
+<a style="border: medium none ; padding: 0pt;" href="drawing2.png"><img src="drawing2.png"></a>
+</td></tr>
+<tr align="center"><td>
+pic. 1: Choosing a route
+</td></tr>
+</table>
+<h2 id="build">Build Instructions</h2>
+<p>
+mcp can be built on Linux and FreeBSD. Gmake and cmake can be used.<br>
+Gmake build:
+<pre>
+$ gmake
+</pre>
+Cmake build:
+<pre>
+$ cmake
+$ make -f Makefile
+</pre>
+No special installation routine currently exists. However, there is a template
+for FreeBSD port in the port/mcp subdirectory, which can be used to install mcp.
+</p>
+<p>
+There are several configurational macro definitions, which can be used to tune
+mcp/mcpd build. These macroses can be added to CXXFLAGS (GNUmakefile) and
+ADD_DEFINITIONS (CMakeLists.txt) with -D prefix (-DNDEBUG).
+<ul>
+  <li>USE_MULTICAST - Enable support for the multicast file transfer. Without
+  this macro only the unicast TCP transfer will be used.
+  <li>USE_EQUATION_BASED_CONGESTION_CONTROL - use the equation based congestion
+  control for the multicast file transfer. It is based on <a
+  href="#ref_1">[1]</a>, but with modification in the loss event rate
+  measuring. <i>(Not sure, if I've implemented this congestion control method
+  correctly. It works good, when multicast transfer takes place in the clear
+  network environtment (without TCP traffic flows). But it shows a very poor speed
+  if there are many tcp connections present.)</i>
+  <li>NDEBUG - disable debug messages and assert(3) checks
+  <li>BUFFER_DEBUG - enable detailed debug messages for the distributor
+  <li>DETAILED_MULTICAST_DEBUG - enable detailed debug for the multicast
+transfer
+</ul>
+</p>
+<h2 id="classes">Main Classes</h2>
+<p>
+The main classes of mcp/mcpd are illustrated in the following diagram.
+</p>
+<table>
+<tr><td>
+<a style="border: medium none ; padding: 0pt;" href="classes.png"><img src="classes.png"></a>
+</td></tr>
+<tr align="center"><td>
+pic. 2: Main Classes (Class Diagram)
+</td></tr>
+</table>
+<p>
+There are two main groups of classes. The first group (Readers) are 
+the classes derived from <code>Reader</code>(<code>Distributor</code>).
+They are <code>FileReader</code> and <code>UnicastReceiver</code>. The
+second group (<code>Writers</code>) are the classes derived from
+<code>Writer</code> (<code>FileWriter</code>, <code>UnicastSender</code>,
+<code>MulticastSender</code>). There is exactly one <code>Reader</code>
+per a running mcp/mcpd instance (fork). It receives data from disk or from a TCP
+connection and transimits it to the <code>Writers</code>.
+</p>
+<p>
+Up to three <code>Writers</code> can be run in the same time. One instance for
+each of the classess is derived from <code>Writer</code>. <code>FileWriter</code>
+writes the received data on disk. <code>UnicastSender</code> and
+<code>MulticastSender</code> transmit the received data to the next
+destination(s). There is one more main class that stands alone from the common
+scheme. This is <code>MulticastReceiver</code>. It receives data sent by
+<code>MulticastSender</code> and writes it to disk. For mcpd sessions with
+<code>MulticastReceiver</code> no Reader is created. The whole mcpd
+functionality in this case is completely implemented in the MulticastReceiver
+class. This communication is illustrated in the following object diagram.
+</p>
+<table>
+<tr><td>
+<a style="border: medium none ; padding: 0pt;" href="communication.png"><img src="communication.png"></a>
+</td></tr>
+<tr align="center"><td>
+pic. 3: Communication between the Objects (Object Diagram).
+</td></tr>
+</table>
+<h2 id="synchronization">Synchronization</h2>
+<p>
+Each of the writers and the reader are implemented in separate threads. For
+synchronization between these threads the <code>Distributor</code> class is
+used. It controls that the data is transmitted to all the <code>Writers</code>
+before the buffer space occupied by this data will be reused. It also handles
+delivery and processing of the errors. <code>Distributor</code> is the base
+class for <code>Reader</code>. Therefore, the <code>FileReader</code> and
+<code>UnicastReceiver</code> objects are responsible for all the synchronization
+and errors delivery.
+</p>
+<p>
+Distributor has the following fields for syncronization purposes:
+<ul>
+  <li><code>operation:TaskHeader</code> - information about the current file or
+directory
+  <li><code>buffer:uint8_t*</code> - buffer with the data for writers
+  <li><code>reader:Distributor::Client</code>
+  <li><code>file_writer:Distributor::Client</code>
+  <li><code>unicast_sender:Distributor::Client</code>
+  <li><code>multicast_sender:Distributor::Client</code>
+</ul>
+<code>Distributor::Client</code> structure contains the following information about particular <code>Reader</code> or <code>Writer</code>.
+<pre>
+  // Structure describing status of the reader or a writer
+  struct Client
+  {
+    bool is_present; // flag indicating whether the object is active
+    bool is_done; // flag indicating whether the current task is done by
+      // this object
+    uint8_t status; // status of the last task, see connection.h
+    unsigned offset; // data offet in the distributor's buffer
+
+    Client() : is_present(false), is_done(true), status(STATUS_OK), offset(0) {}
+  };
+</pre>
+The synchronization is implemented in the following way:
+<ol>
+<li>Reader opens a file or a directory
+<li>Reader calls <code>Distributor::add_task()</code> method. It puts the
+information about the current file to <code>operation:TaskHeader</code>, sets
+is_done field for all the writers to <code>false</code> and set the buffer
+offset to <code>0</code>.  <li>When reader has some data, it calls
+<code>Distributor::get_space()</code> method which returns the amount of free
+space available in the buffer. If no free space available the reader is blocked
+until the space will be released. When <code>get_space()</code> method returns
+some space the Reader puts data into the buffer and calls
+<code>Distributor::update_reader_position()</code>. This method updates
+<code>reader.offset</code> and wakes up all the Writers that have been waiting
+for a new data.
+<li>When some Writer wants to write/send data it calls
+<code>Distributor::get_data()</code>. If there is some data available its
+size will be returned, otherwise the Writer will be blocked until the Reader
+puts some data into the buffer and calls
+<code>Distributor::update_reader_position</code>.  <li>After some data has been
+written, the <code>Writer</code> calls
+<code>Distributor::update_writer_position()</code>. This method updates its
+buffer position and wakes up the Reader (if required).
+<li>When all the file data read the Reader calls
+<code>Distributor::finish_task()</code>, which waits for all the Writers
+to finish.
+<li>If there are some files left to read, the above algorithm is repeated 
+for the next file, otherwise the reader calls
+<code>Distributor::finish_work()</code> and delivers all the unsent errors to the source (for <code>UnicastReceiver</code>). The <code>
+Distributor::finish_work()</code> method sets <code>operation:TaskHeader</code>
+to the trailing task and waits until all the writers finish their work.
+</ol>
+The class diagram for the distributor is illustrated in pic. 4. Protected
+members of the Distributor class are used by the Readers. Almost all the public
+members are either Writer's interfaces or wrappers for the Errors class's
+methods.
+</p>
+
+<table>
+<tr><td>
+<a style="border: medium none ; padding: 0pt;" href="distributor.png"><img src="distributor.png"></a>
+</td></tr>
+<tr align="center"><td>
+pic. 4: Distributor (Class Diagram)
+</td></tr>
+</table>
+
+<h2 id="unicast">Unicast Transfer</h2>
+<h3 id="unicast_init">Session Initialization</h3>
+<p>
+A TCP connection is used for the unicast file transfer. The client (mcp or
+mcpd, for the next hop transfer) establishes a TCP connection with the server
+(mcpd). Only this connection is used during the session. No additional
+connections are created. The client routines are implemented in the
+UnicastSender class, and the server rotines are implemented in the
+UnicastReceiver class.
+</p>
+<p> Unless the -o (preserve order) option are specified, the destinations are
+sorted by ip addresses to partially adapt for the network topology.
+<code>UnicastSender::choose_destination</code> routine chooses a destination
+for the next hop. Currently, it is always the fisrt destination. The client
+calls the <code>UnicastSender::session_init()</code> method, which establishes
+a TCP connection and sends the initial data. The following sequence diagram
+illustrates work of the session_init() method.
+ </p>
+<br><a style="border: medium none ; padding: 0pt;" href="unicast_session_init.png"><img src="unicast_session_init.png"></a>
+
+<p>
+At first the client sends SessionInitializationHeader structure containing a general information for the particular session.
+</p>
+<table cellspacing="0" cellpadding="0" border="1" style="empty-cells:show;">
+<caption>Session Initialization Header</caption>
+<tr height="6">
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+</tr>
+<tr align="center" height="32">
+<td>version</td>
+<td colspan="3">unused</td>
+<td colspan="4">flags</td>
+</tr>
+<tr align="center" height="32">
+<td colspan="4">n_sources</td>
+<td colspan="4">path_length</td>
+</tr>
+<tr align="center" height="32">
+<td colspan="8">path (variable length)</td>
+</tr>
+</table>
+<ul>
+  <li>version - protocol version (2)
+  <li>flags - the following flags are currently defined.
+    <ul>
+      <li>PRESERVE_ORDER_FLAG(1). If set (-o option), the first destination
+always will be choosed be <code>UnicastSender::choose_destination</code>.
+Without the -o option UnicastSender will sort the destinations.
+      <li>UNICAST_ONLY_FLAG(2). if set (-U option), neither mcp nor mcpd won't try to establish multicast connections.
+      <li>VERIFY_CHECKSUMS_TWISE_FLAG(4). if set (-c option), UnicastReceiver will additionally read file from the disk and verify the checksum. Note: Checksum is always verified for the received data.
+    </ul>
+  <li>n_sources - the number of sources specified to the mcp tool
+  <li>path_length - length of the target path for the server
+  <li>path - target path for the server (specified as mcp argument)
+</ul>
+
+<p>
+Then the client sends zero or more DestinationHeader structures.
+These structures contain necessary information for the server to establish
+the next hop unicast connection (pipelined transfer).
+</p>
+<table cellspacing="0" cellpadding="0" border="1" style="empty-cells:show">
+<caption>Destination Header</caption>
+<tr height="6">
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+</tr>
+<tr align="center" height="32">
+<td colspan="4">addr</td>
+<td colspan="4">path_length</td>
+</tr>
+<tr align="center" height="32">
+<td colspan="8">path (variable length)</td>
+</tr>
+</table>
+<ul>
+  <li>addr - IP address of the destination 
+  <li>path_length - length of the target path for the particular destination
+  <li>path - the target path for the particular destination
+</ul>
+
+<p>
+When the above information for all the destinations is sent, the client sends
+the DestinationTrailing structure.  It is a DestinationHeader structure with
+zero addr and path_length followed by the MD5 checksum for all the previously
+sent data.
+</p>
+<table cellspacing="0" cellpadding="0" border="1" style="empty-cells:show">
+<caption>Destination Trailing</caption>
+<tr height="6">
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+</tr>
+<tr align="center" height="32">
+<td colspan="4">0 (addr)</td>
+<td colspan="4">0 (path_length)</td>
+</tr>
+<tr align="center" height="64">
+<td colspan="8">MD5 checksum</td>
+</tr>
+</table>
+<ul>
+  <li>MD5 checksum - Checksum for the previously send headers
+</ul>
+
+<p>
+Then, the client awaits the reply from the server.
+The server sends the reply before it tries to establish the next hop connection.
+If the reply has status 0(STATUS_OK) the client finishes the initialization.
+</p>
+<h3 id="unicast_session">Session</h3>
+<p>
+When all the writers are initialized, the <code>UnicastSender::session</code>
+routine is called. The work of the <code>UnicastSender::session</code> routine
+is illustrated in the following diagram.
+</p>
+
+<br><a style="border: medium none ; padding: 0pt;" href="unicast_session.png"><img src="unicast_session.png"></a>
+</p>
+All the transfers inside the <code>UnicastSender::session</code> routine are
+asynchronous.  For each file or directory the client sends the
+<code>FileInfoHeader</code> data structure.
+</p>
+<table cellspacing="0" cellpadding="0" border="1" style="empty-cells:show">
+<caption>FileInfoHeader</caption>
+<tr height="6">
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+<td width="80"></td><td width="80"></td>
+</tr>
+<tr align="center" height="32">
+<td>unused</td>
+<td>type</td>
+<td colspan="2">mode</td>
+<td colspan="2">name_length</td>
+<td colspan="2">name_offset</td>
+</tr>
+<tr align="center" height="32">
+<td colspan="8">file_size</td>
+</tr>
+<tr align="center" height="32">
+<td colspan="8">file_name (variable length)</td>
+</tr>
+</table>
+<ul>
+  <li>type - 0 mean a file, 1 - a directory
+  <li>mode - the unix file mode (flags and permissions)
+  <li>name_length - length of the file name and the path from the specified location
+  <li>name_offset - offset of the actual file name (without path)
+  <li>file_size - length of the file data (in bytes)
+  <li>file_name - file/directory name and the path from the specified location
+</ul>
+The file info header contains name, path and size for the transferred file.
+File size is used to separate files in the flow.  If the source file size
+increased during the transfer, only the first file_size bytes will be
+transferred. It is controlled by FileReader::read_from_file.  If the file has
+been shrinked during the transfer, the TCP out-of-band data will be used to
+delimit the file from the next FileInfoHeader structure. (<i>this is an ugly solution, but there were some bugs in processing of TCP OOB in FreeBSD 7</i>)
+
+<h2 id="multicast">Multicast Transfer</h2>
+<p>
+For the multicast file transfer multicast session is established with the
+reachable destinations. The multicast session is implemented in the
+MulticastSender and MulticastReceiver classes. MulticastSender stores
+unconfirmed sent messsages in the MulticastSendQueue object. MulticastReceiver
+maintains two queues: MulticastRecvQueue and MulticastErrorQueue.
+MulticastRecvQueue contains messages received but not processed by the
+MulticastReceiver, and MulticastErrorQueue contains error messages the
+MulticastReceiver should send.
+</p>
+<a style="border: medium none ; padding: 0pt;" href="multicast_classes.png"><img src="multicast_classes.png"></a>
+<p>
+The client side of the multicast file transfer is implemented in the
+MulticastSender class. mcp or mcpd calls
+<code>MulticastSender::create_and_initialize()</code> static method which
+returns a newly created MulticastSender object. Then mcp/mcpd creates a new
+thread and calls <code>MulticastSender::session()</code> method which does all
+the client's routine. 
+</p>
+<p>
+The MulticastSender::create_and_initialize method does the following:
+<ol>
+<li>Choose the destinations available through the multicast UDP and
+network interface, that will be used. Unless the -g is not set only link-local
+destinations (for one of the interfaces) can be used.
+<li>Create an object of the MulticastSender class.
+<li>Calls the <code>MulticastSender::session_init()</code> routine.
+<li>If <code>MulticastSender::session_init()</code> succeeded the object is
+returned, otherwise the routine deletes the object and tries to establish
+the multicast session again unless some fatal error occurred.
+</ol>
+The <code>MulticastSender::session_init()</code> routine tries to establish
+the multicast session with the selected destinations. The Multicast session is
+identified by a multicast address and an ephemeral udp port. New multicast
+address is randomly choosen from the range
+<code>MULTICAST_EPHEMERAL_ADDR_RANGE</code>. It will be called an ephemeral
+multicast address.
+
+The Multicast session initialization looks the following.
+<code>MulticastSender::session_init</code> se
+<a style="border: medium none ; padding: 0pt;"
+href="multicast_session_init.png"><img src="multicast_session_init.png"></a>
+<p>
+
+After choosing an ephemeral address and a port the
+<code>MulticastSender ::session_init()</code> tries to establish the session.
+</p>
+
+<h2 id="security">Security Considerations</h2>
+<p>
+Currently, both the multicast and the unicast transfers are completely unsecure.
+They are designed for local network protected by firewalls.
+</p>
+<h2>External links</h2>
+<ol>
+  <li><a name="ref_1" href="http://www.cs.ucl.ac.uk/staff/m.handley/papers/tfmcc-sigcomm.pdf">Extending Equation-based Congestion Control to Multicast
+Applications. Jorg Widmer, Mark Handley.</a>
+</ol>
+</body>
+</html>

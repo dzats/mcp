@@ -119,8 +119,8 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     unsigned number = *missed_packets.begin();
     missed_packets.erase(missed_packets.begin());
 
-    unsigned offset = number -
-      ((MulticastMessageHeader * const)buffer[0]->message)->get_number();
+    const MulticastMessageHeader * const mmh = reinterpret_cast<const MulticastMessageHeader * const>(buffer[0]->message);
+    unsigned offset = number - mmh->get_number();
 #ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("error offset: %d\n", offset);
 #endif
@@ -322,8 +322,8 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     number, destination, store_position, buffer.size());
 #endif
 
-  unsigned offset = number -
-    ((MulticastMessageHeader * const)buffer[0]->message)->get_number();
+  const MulticastMessageHeader * const mmh = reinterpret_cast<const MulticastMessageHeader * const>(buffer[0]->message);
+  unsigned offset = number - mmh->get_number();
 #ifdef DETAILED_MULTICAST_DEBUG
   DEBUG("offset: %d\n", offset);
 #endif
@@ -507,8 +507,8 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
 
   // Update the Round-Trip Time information, if there were no
   // retransmissions for this packet
-  unsigned offset = number -
-    ((MulticastMessageHeader * const)buffer[0]->message)->get_number();
+  const MulticastMessageHeader * const mmh = reinterpret_cast<const MulticastMessageHeader * const>(buffer[0]->message);
+  unsigned offset = number - mmh->get_number();
   DEBUG("offset: %u, first: %u, number: %u\n", offset,
     ((MulticastMessageHeader *)buffer.front()->message)->get_number(),
     number);
@@ -695,8 +695,8 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
 #ifdef DETAILED_MULTICAST_DEBUG
           DEBUG("New window size: %u\n", window_size);
 #endif
-          last_packet_caused_congestion = 
-            ((MulticastMessageHeader * const)buffer[store_position - 1]->message)->get_number() +
+          const MulticastMessageHeader * const mmh = reinterpret_cast<const MulticastMessageHeader * const>(buffer[store_position - 1]->message);
+          last_packet_caused_congestion = mmh->get_number() +
             (ssthresh / UDP_MAX_LENGTH);
         }
 #if 0
