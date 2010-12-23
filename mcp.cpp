@@ -30,6 +30,12 @@
 #include "log.h"
 
 #define MAX_RETRANSMISSIONS 5
+#define RECONNECTION_TIMEOUT 10 // seconds. The actual timeout is randomly
+  // varied in the range from the specified value to the specified value +
+  // RECONNECTION_TIMEOUT_SPREAD.
+#define RECONNECTION_TIMEOUT_SPREAD 2 // seconds. The actual timeout is randomly
+  // varied in the range from the specified value to the doubled specified
+  // value.
 
 using namespace std;
 
@@ -47,11 +53,13 @@ void usage_and_exit(char *name)
   "\t-P port\n"
   "\t\tSpecify port the server will use for multicast connections\n"
   "\t\tinstead of the default port (" NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
-  "\t-U\tUnicast only (for all hops)\n"
-  "\t-u\tUnicast only (for the first hop)\n"
-  "\t-m\tMulticast only\n"
+  "\t-U\tUnicast only (for all hops).\n\n"
+  "\t-u\tUnicast only (for the first hop).\n\n"
+  "\t-m\tMulticast only.\n\n"
   "\t-c\tVerify the file checksums twise. The second verification is\n"
-  "\t\tperformed on data written to the disk.\n"
+  "\t\tperformed on data written to the disk.\n\n"
+  "\t-b bytes\n"
+  "\t\tSet per-sender bandwidth limit (in bytes per second).\n\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
   "\t\ttransfert.\n");
   exit(EXIT_FAILURE);
@@ -63,9 +71,11 @@ void *unicast_sender_routine(void *args)
 {
   SDEBUG("Start the unicast sender\n");
   UnicastSender *us = (UnicastSender *)args;
-  if (us->session() != 0) {
+  uint8_t status = us->session();
+  if (status != STATUS_OK) {
     // Report about an error
-    return (void *)-1;
+    DEBUG("Unicast sender finished with error: %u\n", status);
+    return (void *)status;
   }
   return NULL;
 }
@@ -204,6 +214,8 @@ int main(int argc, char **argv)
   uint16_t unicast_port = UNICAST_PORT; // TCP port used for unicast connections
   uint16_t multicast_port = MULTICAST_PORT; // UDP port used
     // for multicast connections
+  unsigned bandwidth = 0; // Maximum data bandwidth per one sender
+    // (in bytes per 1.048576 seconds)
   uint32_t flags = 0;
 #ifdef USE_MULTICAST // Multicast is temporary switched off
   bool is_unicast_only = false; // If it's true, use only the unicast traffic
@@ -219,12 +231,12 @@ int main(int argc, char **argv)
 
   // Parse the command options
   int ch;
-  while ((ch = getopt(argc, argv, "p:P:omUuch")) != -1) {
+  while ((ch = getopt(argc, argv, "p:P:omUub:ch")) != -1) {
     switch (ch) {
       case 'p': // Port specified
         if ((unicast_port = atoi(optarg)) == 0) {
           ERROR("Invalid port: %s\n", optarg);
-          exit(EXIT_FAILURE);
+          return EXIT_FAILURE;
         }
         if (multicast_port == MULTICAST_PORT) {
           multicast_port = unicast_port;
@@ -233,7 +245,7 @@ int main(int argc, char **argv)
       case 'P': // Multicast port
         if ((multicast_port = atoi(optarg)) == 0) {
           ERROR("Invalid port: %s\n", optarg);
-          exit(EXIT_FAILURE);
+          return EXIT_FAILURE;
         }
         break;
       case 'o': // Preserve order during pipe transfert (don't
@@ -253,6 +265,18 @@ int main(int argc, char **argv)
         break;
       case 'u': // Use only the unicast traffic for the first hop
         is_first_hop_unicast_only = true;
+        break;
+      case 'b': // Set per-sender bandwidth
+        bandwidth = atoi(optarg);
+        if (bandwidth != 0) {
+          // Change the bandwidth's unit of measurement
+          uint64_t b = bandwidth;
+          b = (b << 20) / 1000000;
+          bandwidth = b;
+        } else {
+          ERROR("Incorrect bandwidth: %s\n", optarg);
+          return EXIT_FAILURE;
+        }
         break;
       case 'c': // Verify the file checksums twise
         verify_checksums_twise = true;
@@ -375,13 +399,15 @@ int main(int argc, char **argv)
   }
   do {
     // The main objects
-    FileReader *source_reader = new FileReader();
+    FileReader *source_reader;
     UnicastSender *unicast_sender = NULL;
     MulticastSender *multicast_sender = NULL;
     pthread_t unicast_sender_thread;
     pthread_t multicast_sender_thread;
     bool is_unicast_sender_started = false;
     bool is_multicast_sender_started = false;
+
+    const vector<Destination> *remaining_dst = NULL;
 
 #ifndef NDEBUG
     printf("Sources:\n");
@@ -404,18 +430,36 @@ int main(int argc, char **argv)
       }
     }
 #endif
+    try_to_connect_again:
+    source_reader = new FileReader();
   
     // Initialize the multicast sender
-    const vector<Destination> *remaining_dst = NULL;
     if (!is_unicast_only && !is_first_hop_unicast_only) {
-      multicast_sender = MulticastSender::create_and_initialize(dst,
-        &remaining_dst, n_sources, is_multicast_only,
+      multicast_sender = MulticastSender::create_and_initialize(
+        dst, &remaining_dst, n_sources, is_multicast_only,
         source_reader, MulticastSender::client_mode, multicast_port,
-        n_retransmissions);
+        bandwidth, n_retransmissions);
       if (remaining_dst == NULL) {
         // Some error occurred during the multicast sender initialization
-        source_reader->display_errors();
-        exit(EXIT_FAILURE);
+        SDEBUG("Initialization of the multicast sender failed.\n");
+        if (source_reader->is_unrecoverable_error_occurred()) {
+          source_reader->display_errors();
+          delete source_reader;
+          exit(EXIT_FAILURE);
+        } else {
+          source_reader->delete_server_is_busy_errors();
+          delete source_reader;
+          // FIXME: add limitation to the muximum time a client can wait
+          // till some server is busy.
+          DEBUG("Will try to connect again after %u milleseconds\n", 
+            1000000 * RECONNECTION_TIMEOUT +
+            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+            ((float)rand()/RAND_MAX)));
+          usleep(1000000 * RECONNECTION_TIMEOUT +
+            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+            ((float)rand()/RAND_MAX)));
+          goto try_to_connect_again;
+        }
       }
       if (is_multicast_only && remaining_dst->size() != 0) {
         char *hosts = (char *)strdup("");
@@ -425,9 +469,7 @@ int main(int argc, char **argv)
           ++i;
           char addr[INET_ADDRSTRLEN + 2];
           inet_ntop(AF_INET, &address, addr, sizeof(addr));
-          if (i != remaining_dst->end()) {
-            strcat(addr, ", ");
-          }
+          if (i != remaining_dst->end()) { strcat(addr, ", "); }
           hosts = (char *)realloc(hosts, strlen(hosts) + strlen(addr) + 1);
           strcat(hosts, addr);
         }
@@ -438,6 +480,56 @@ int main(int argc, char **argv)
       }
     } else {
       remaining_dst = &dst;
+    }
+  
+    if (remaining_dst->size() > 0) {
+      unicast_sender = new UnicastSender(source_reader,
+        UnicastSender::client_mode, unicast_port, flags, bandwidth);
+      // Establish the unicast session
+      uint8_t session_init_result =
+        unicast_sender->session_init(*remaining_dst, n_sources);
+      if (session_init_result != STATUS_OK) {
+        if (session_init_result == STATUS_SERVER_IS_BUSY) {
+          // Server is busy, wait for some time then try to establish
+          // connections again
+          delete unicast_sender;
+          unicast_sender = NULL;
+          if (multicast_sender != NULL) {
+            multicast_sender->abnormal_termination();
+            delete multicast_sender;
+            multicast_sender = NULL;
+          }
+          if (remaining_dst != NULL && remaining_dst != &dst) {
+            delete remaining_dst;
+          }
+          remaining_dst = NULL;
+          source_reader->delete_server_is_busy_errors();
+          delete source_reader;
+          // FIXME: add limitation for the muximum time the client can wait
+          DEBUG("Will try to connect again after %u milleseconds\n", 
+            1000000 * RECONNECTION_TIMEOUT +
+            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+            ((float)rand()/RAND_MAX)));
+          usleep(1000000 * RECONNECTION_TIMEOUT +
+            unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+            ((float)rand()/RAND_MAX)));
+          goto try_to_connect_again;
+        } else {
+          source_reader->display_errors();
+          SDEBUG("UnicastSender::session_init method failed\n");
+          return EXIT_FAILURE;
+        }
+      }
+
+      // Start the unicast_sender thread
+      int error;
+      error = pthread_create(&unicast_sender_thread, NULL,
+        unicast_sender_routine, (void *)unicast_sender);
+      if (error != 0) {
+        ERROR("Can't create a new thread: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+      }
+      is_unicast_sender_started = true;
     }
 
     if (remaining_dst->size() < dst.size()) {
@@ -452,32 +544,14 @@ int main(int argc, char **argv)
       is_multicast_sender_started = true;
     }
   
-    if (remaining_dst->size() > 0) {
-      unicast_sender = new UnicastSender(source_reader,
-        UnicastSender::client_mode, unicast_port, flags);
-      // Establish the unicast session
-      if (unicast_sender->session_init(*remaining_dst, n_sources) != 0) {
-        source_reader->display_errors();
-        return EXIT_FAILURE;
-      }
-  
-      // Start the unicast_sender thread
-      int error;
-      error = pthread_create(&unicast_sender_thread, NULL,
-        unicast_sender_routine, (void *)unicast_sender);
-      if (error != 0) {
-        ERROR("Can't create a new thread: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-      }
-      is_unicast_sender_started = true;
-    }
-  
     bool is_unrecoverable_error_occurred = false;
+    bool is_some_server_busy = false;
     uint8_t source_reader_result = 
       source_reader->read_sources(filenames, filename_offsets);
     if (source_reader_result != STATUS_OK &&
-        source_reader_result != STATUS_INCORRECT_CHECKSUM) {
-      SDEBUG("The SourceReader finished with fatal error\n");
+        source_reader_result != STATUS_INCORRECT_CHECKSUM &&
+        source_reader_result != STATUS_SERVER_IS_BUSY) {
+      SDEBUG("The SourceReader finished with unrecoverable error\n");
       is_unrecoverable_error_occurred = true;
     }
   
@@ -485,9 +559,16 @@ int main(int argc, char **argv)
     void *result;
     if (is_unicast_sender_started) {
       pthread_join(unicast_sender_thread, &result);
-      if (result != NULL) {
-        SDEBUG("The UnicastSender finished with fatal error\n");
-        is_unrecoverable_error_occurred = true;
+      uint8_t status = (uint8_t)(unsigned long)result;
+      if (status != STATUS_OK) {
+        assert(status != STATUS_INCORRECT_CHECKSUM);
+        if (status == STATUS_SERVER_IS_BUSY) {
+          SDEBUG("The UnicastSender finished with the SERVER_IS_BUSY error\n");
+          is_some_server_busy = true;
+        } else {
+          SDEBUG("The UnicastSender finished with an unrecoverable error\n");
+          is_unrecoverable_error_occurred = true;
+        }
       }
     }
     if (is_multicast_sender_started) {
@@ -498,6 +579,7 @@ int main(int argc, char **argv)
       }
     }
 
+    source_reader->delete_server_is_busy_errors();
     source_reader->display_errors();
     if (source_reader->is_unrecoverable_error_occurred()) {
       is_unrecoverable_error_occurred = true;
@@ -508,15 +590,35 @@ int main(int argc, char **argv)
     }
 
     SDEBUG("Finished, clean up the data\n");
-    if (multicast_sender != NULL) { delete multicast_sender; }
-    if (unicast_sender != NULL) { delete unicast_sender; }
+    if (multicast_sender != NULL) {
+      delete multicast_sender;
+      multicast_sender = NULL;
+    }
+    if (unicast_sender != NULL) {
+      delete unicast_sender;
+      unicast_sender = NULL;
+    }
+    if (remaining_dst != NULL && remaining_dst != &dst) {
+      delete remaining_dst;
+    }
+
+    // Restart the client if some of the servers have been busy
+    if (is_some_server_busy) {
+      // FIXME: add limitation to the muximum time the client can wait
+      DEBUG("Will try to connect again after %u milleseconds\n", 
+        1000000 * RECONNECTION_TIMEOUT +
+        unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+        ((float)rand()/RAND_MAX)));
+      usleep(1000000 * RECONNECTION_TIMEOUT +
+        unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
+        ((float)rand()/RAND_MAX)));
+      goto try_to_connect_again;
+    }
+
     char **p = filenames;
     while (*p != NULL) {
       free(*p);
       ++p;
-    }
-    if (remaining_dst != NULL && remaining_dst != &dst) {
-      delete remaining_dst;
     }
     free(filenames);
     free(filename_offsets);

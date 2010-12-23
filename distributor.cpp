@@ -19,8 +19,16 @@ void Distributor::SimpleError::display() const
   if (address != INADDR_NONE) {
     char host[INET_ADDRSTRLEN];
     uint32_t addr = htonl(address);
-    ERROR("from host %s: %s\n",
-      inet_ntop(AF_INET, &addr, host, sizeof(host)), message);
+    if (message_length != 0) {
+      ERROR("from host %s: %s\n",
+        inet_ntop(AF_INET, &addr, host, sizeof(host)), message);
+    } else if (status == STATUS_SERVER_IS_BUSY) {
+      ERROR("Server %s is busy\n",
+        inet_ntop(AF_INET, &addr, host, sizeof(host)));
+    } else {
+      ERROR("Error %u received from %s\n", status,
+        inet_ntop(AF_INET, &addr, host, sizeof(host)));
+    }
   } else {
     ERROR("%s\n", message);
   }
@@ -43,7 +51,9 @@ void Distributor::SimpleError::send(int sock)
   
     ReplyHeader h(status, address, message_length);
     sendn(sock, &h, sizeof(h), 0);
-    sendn(sock, message, message_length, 0);
+    if (message_length != 0) {
+      sendn(sock, message, message_length, 0);
+    }
   } catch (ConnectionException& e) {
     ERROR("Can't send error to the source: %s\n", e.what());
   }
@@ -158,7 +168,8 @@ bool Distributor::Errors::is_unrecoverable_error_occurred()
   bool result = false;
   for (list<ErrorMessage*>::const_iterator i = errors.begin();
       i != errors.end(); ++i) {
-    if ((*i)->status != STATUS_INCORRECT_CHECKSUM) {
+    if ((*i)->status != STATUS_INCORRECT_CHECKSUM &&
+        (*i)->status != STATUS_SERVER_IS_BUSY) {
       result = true;
       break;
     }
@@ -426,7 +437,12 @@ int Distributor::get_data(Client *w)
 int Distributor::get_space()
 {
   int count;
+  count = _get_space();
   pthread_mutex_lock(&mutex);
+  if (unicast_sender.status >= STATUS_FIRST_FATAL_ERROR ||
+      multicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+    return 0;
+  }
   count = _get_space();
   while (count == 0) {
 #ifdef BUFFER_DEBUG

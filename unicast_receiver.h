@@ -13,6 +13,8 @@
 class UnicastReceiver : public Reader
 {
   int sock;
+  volatile unsigned *bytes_received;
+  unsigned bandwidth;
 
   // Prohibit coping for objects of this class
   UnicastReceiver(const UnicastReceiver&);
@@ -25,12 +27,15 @@ public:
   uint32_t local_address;
   PathType path_type;
 
-  UnicastReceiver() : sock(-1), path(NULL) {}
+  UnicastReceiver(void *shared_mem, unsigned bw) : sock(-1),
+      bandwidth(bw), path(NULL)
+  {
+    bytes_received = (volatile unsigned *)shared_mem;
+  }
   ~UnicastReceiver()
   {
-    if (path != NULL) {
-      free(path);
-    }
+    if (path != NULL) { free(path); }
+    if (sock != -1) { close(sock); }
   }
   
   // Establishes the network session from the TCP connection 'sock'

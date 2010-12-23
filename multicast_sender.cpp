@@ -36,6 +36,14 @@ uint16_t MulticastSender::choose_ephemeral_port()
 
     bind_result = bind(sock, (struct sockaddr *)&ephemeral_addr,
       sizeof(ephemeral_addr));
+
+    // Set default interface for the multicast traffic
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+        &ephemeral_addr.sin_addr, sizeof(ephemeral_addr.sin_addr)) != 0) {
+      ERROR("Can't set default interface for outgoing multicast traffic: %s\n",
+        strerror(errno));
+      exit(EXIT_FAILURE);
+    }
   } while (bind_result != 0 && tries-- > 0 && errno == EADDRINUSE);
   return bind_result == 0 ? ephemeral_port : 0;
 }
@@ -59,8 +67,13 @@ void MulticastSender::register_error(uint8_t status, const char *fmt,
 // like it is done for the session initialization routine
 void MulticastSender::abnormal_termination() {
   SDEBUG("Abnormal termination of the multicast connection\n");
-  unsigned max_rtt = send_queue->get_max_round_trip_time();
-  if (max_rtt == 0) {
+  unsigned max_rtt;
+  if (send_queue != NULL) {
+    max_rtt = send_queue->get_max_round_trip_time();
+    if (max_rtt == 0) {
+      max_rtt = DEFAULT_ROUND_TRIP_TIME;
+    }
+  } else {
     max_rtt = DEFAULT_ROUND_TRIP_TIME;
   }
   // Compose the multicast abnormal termination request message
@@ -79,6 +92,7 @@ void MulticastSender::abnormal_termination() {
 
   try {
     for (unsigned i = 0; i < MAX_ABNORMAL_TERMINATION_RETRIES; ++i) {
+      DEBUG("Send MULTICAST_ABNORMAL_TERMINATION_REQUEST %u\n", i);
       udp_send(message, message_length, 0);
       usleep(max_rtt >> 1);
     }
@@ -268,6 +282,33 @@ void MulticastSender::udp_send(const void *message, int size, int flags)
     inet_ntop(AF_INET, &target_address.sin_addr, taddr, sizeof(taddr)),
     ntohs(target_address.sin_port));
 #endif
+
+  if (bandwidth != 0) {
+    // Bandwidth limitation enabled
+    struct timeval current_timestamp;
+    gettimeofday(&current_timestamp, NULL);
+    allowed_to_send += ((int64_t)bandwidth *
+      (current_timestamp.tv_usec - bandwidth_estimation_timestamp.tv_usec)) >>
+      20;
+    allowed_to_send += (bandwidth  - (bandwidth >> 5) - (bandwidth >> 6)) *
+      (current_timestamp.tv_sec - bandwidth_estimation_timestamp.tv_sec);
+#ifdef DETAILED_MULTICAST_DEBUG
+    DEBUG("size: %u, allowed_to_send: %llu\n", size, allowed_to_send);
+#endif
+    if (allowed_to_send > 8LL * 1024 * 1024) {
+      allowed_to_send = 4LL * 1024 * 1024;
+    }
+    bandwidth_estimation_timestamp = current_timestamp;
+    if ((unsigned)size > allowed_to_send) {
+#ifdef DETAILED_MULTICAST_DEBUG
+      DEBUG("Sleep for %llu\n",
+        (((int64_t)size - allowed_to_send) << 20) / bandwidth);
+#endif
+      internal_usleep((((int64_t)size - allowed_to_send) << 20) / bandwidth);
+    }
+    allowed_to_send -= size;
+  }
+  
   int sendto_result;
   do {
     sendto_result = sendto(sock, message, size, 0,
@@ -366,6 +407,7 @@ MulticastSender *MulticastSender::create_and_initialize(
     Reader *reader,
     Mode mode,
     uint16_t multicast_port,
+    unsigned bandwidth,
     unsigned n_retransmissions)
 {
   MulticastSender *multicast_sender = NULL;
@@ -434,7 +476,7 @@ MulticastSender *MulticastSender::create_and_initialize(
 #endif
     {
       multicast_sender = new MulticastSender(reader,
-        mode, multicast_port, n_sources, n_retransmissions);
+        mode, multicast_port, n_sources, n_retransmissions, bandwidth);
       // Establish the multicast session
       const vector<Destination> *si_result;
       si_result = multicast_sender->session_init(local_addresses[i],
@@ -493,6 +535,9 @@ const std::vector<Destination>* MulticastSender::session_init(
   local_address = local_addr;
   targets.clear();
   map<uint32_t, unsigned> round_trip_times;
+  
+  allowed_to_send = MAX_UDP_PACKET_SIZE * 4;
+  gettimeofday(&bandwidth_estimation_timestamp, NULL);
   
   // Fill up the multicast address to be used in the connection
   memset(&target_address, 0, sizeof(target_address));
@@ -584,12 +629,12 @@ const std::vector<Destination>* MulticastSender::session_init(
           // TODO: Do something in the case if the port is already in use
           // on some destination
           MulticastMessageHeader *mih = (MulticastMessageHeader *)buffer;
-          if (mih->get_message_type() != MULTICAST_INIT_REPLY ||
-              mih->get_session_id() != session_id) {
-            DEBUG("Incorrect reply of length %d received\n", length);
+          if (mih->get_session_id() != session_id) {
+            DEBUG("Wrong session id (%x) in the received reply\n",
+              mih->get_session_id());
             // Silently skip the message
             continue;
-          } else {
+          } else if (mih->get_message_type() == MULTICAST_INIT_REPLY) {
             DEBUG("Received reply of length %d\n", length);
             ++replies_now;
             n_unreplied_init_requests = 0;
@@ -633,6 +678,24 @@ const std::vector<Destination>* MulticastSender::session_init(
             if (remaining_dst->size() == 0) {
               // All the destinations responded
               goto finish_session_initialization;
+            }
+          } else {
+            if (mih->get_message_type() == MULTICAST_ERROR_MESSAGE) {
+              ReplyHeader *rh = (ReplyHeader *)(mih + 1);
+              DEBUG("Error (%u) received\n", rh->get_status());
+              reader->errors.add(new Reader::SimpleError(rh->get_status(),
+                rh->get_address(), (char *)(rh + 1), rh->get_msg_length()));
+              reader->update_multicast_sender_status(rh->get_status());
+              if (rh->get_status() >= STATUS_FIRST_FATAL_ERROR) {
+                // Terminate the connection
+                target_address.sin_port = htons(ephemeral_port);
+                sort(targets.begin(), targets.end());
+                abnormal_termination();
+                return NULL;
+              }
+            } else {
+              DEBUG("Message of unknown type %x received\n",
+                mih->get_message_type());
             }
           }
         } else if (poll_result == 0) {

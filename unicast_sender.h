@@ -25,6 +25,7 @@ private:
   int sock;
   uint16_t port;
   uint32_t flags;
+  unsigned bandwidth; // Bandwidth limit for this particular sender
 
   // Tries to establish TCP connection with the host 'addr'
   void connect_to(in_addr_t addr) throw (ConnectionException);
@@ -44,6 +45,10 @@ private:
   // Returns the number of bytes sent or (size + 1) on failure
   uint64_t write_to_socket(int sock, uint64_t size);
 
+  // Writes data (not more that size) from the distributor to sock.
+  // Returns the number of bytes sent or (size + 1) on failure
+  uint64_t write_to_socket_with_limited_bandwidth(int sock, uint64_t size);
+
   // Register an error and finish the current task
   void register_error(uint8_t status, const char *fmt, uint32_t address,
     const char *error);
@@ -51,9 +56,9 @@ public:
   uint32_t target_address; // address of next immediate destination
   std::string last_error_message; // Message corresponding to the last error
 
-  UnicastSender(Reader* b, Mode m, uint16_t p, uint32_t f) : Writer(b,
-      (Reader::Client *)&b->unicast_sender), mode(m), sock(-1), port(p),
-      flags(f) {}
+  UnicastSender(Reader* b, Mode m, uint16_t p, uint32_t f,
+      unsigned bw) : Writer(b, (Reader::Client *)&b->unicast_sender),
+      mode(m), sock(-1), port(p), flags(f), bandwidth(bw) {}
   ~UnicastSender()
   {
     if (sock != -1) { close(sock); }
@@ -62,12 +67,12 @@ public:
     This is the initialization routine that establish the unicast
     session with one of the destinations.
   */
-  int session_init(const std::vector<Destination>& dst, int n_sources);
+  uint8_t session_init(const std::vector<Destination>& dst, int n_sources);
 
   /*
     This is the main routine of the unicast sender. This routine sends
     the files and directories to the next destination.
   */
-  int session();
+  uint8_t session();
 };
 #endif

@@ -67,6 +67,12 @@ private:
   uint32_t local_address; // Local IP address of the interface used for
     // multicast connection
   struct sockaddr_in target_address; // address used for multicast connection
+  unsigned bandwidth; // Bandwidth limit for this particular sender
+
+  int64_t allowed_to_send; // auxilary variable used to
+    // implement the bandwidth limitation
+  struct timeval bandwidth_estimation_timestamp; // auxilary variable used to
+    // implement the bandwidth limitation
 
   uint32_t address; // Multicast address that will be used in connection
   uint16_t port; // port that will be used for multicast connections
@@ -91,9 +97,16 @@ private:
 public:
 
   MulticastSender(Reader* b, Mode m, uint16_t p, uint32_t n_sources,
-      unsigned n_retrans) : Writer(b, (Reader::Client *)&b->multicast_sender),
-      mode(m), sock(-1), port(p), send_queue(NULL), next_message(0),
-      next_responder(0), n_sources(n_sources)
+      unsigned n_retrans, unsigned bw) :
+      Writer(b, (Reader::Client *)&b->multicast_sender),
+      mode(m),
+      sock(-1),
+      bandwidth(bw),
+      port(p),
+      send_queue(NULL),
+      next_message(0),
+      next_responder(0),
+      n_sources(n_sources)
   {
     address = inet_addr(DEFAULT_MULTICAST_ADDR);
     session_id = getpid() + ((n_retrans & 0xFF) << 24);
@@ -121,6 +134,7 @@ public:
     Reader *reader,
     Mode mode,
     uint16_t multicast_port,
+    unsigned bandwidth,
     unsigned n_retransmissions);
 
   /*
@@ -137,6 +151,9 @@ public:
   */
   int session();
 
+  // Abnormal multicast connection termination
+  void abnormal_termination();
+
 private:
   // A helper function that chooses a UDP port and binds socket to it
   uint16_t choose_ephemeral_port();
@@ -149,9 +166,6 @@ private:
 
   // A helper function which sends file to the multicast destinations
   void send_file();
-
-  // Abnormal multicast connection termination
-  void abnormal_termination();
 
   // Routine that controls the multicast packets delivery,
   // should be started in a separate thread

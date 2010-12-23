@@ -87,11 +87,15 @@ public:
     {
       this->address = address;
       this->message_length = message_length;
-      this->message = (uint8_t *)strdup(message);
+      if (message_length != 0) {
+        this->message = (uint8_t *)strdup(message);
+      } else {
+        this->message = NULL;
+      }
     }
     ~SimpleError()
     {
-      free(message);
+      if (message != NULL) { free(message); }
     }
     void display() const;
     void send(int sock);
@@ -155,6 +159,20 @@ public:
     // Displays the registered errors 
     void display();
 
+    // Delete the STATUS_SERVER_IS_BUSY errors
+    void delete_server_is_busy_errors() {
+      for(std::list<ErrorMessage*>::iterator i = errors.begin();
+          i != errors.end(); ++i) {
+        if ((*i)->status == STATUS_SERVER_IS_BUSY) {
+          delete(*i);
+          std::list<ErrorMessage*>::iterator next = i;
+          ++next;
+          errors.erase(i);
+          i = next;
+        }
+      }
+    }
+
     // Returns true if some of the errors is unrecoverable (even if it is not
     // fatal) and false otherwise
     bool is_unrecoverable_error_occurred();
@@ -183,7 +201,7 @@ public:
   volatile Client unicast_sender; // the unicast sender object
   volatile Client multicast_sender; // the multicast sender object
 
-  static const unsigned DEFAULT_BUFFER_MASK = 0xFFFF; // must be equal
+  static const unsigned DEFAULT_BUFFER_MASK = 0xFFFFF; // must be equal
     // to 2^n - 1
   static const unsigned DEFAULT_BUFFER_SIZE = (DEFAULT_BUFFER_MASK + 1);
   MD5sum checksum;
@@ -313,6 +331,11 @@ public:
   void display_errors()
   {
     errors.display();
+  }
+
+  // Delete the STATUS_SERVER_IS_BUSY errors
+  void delete_server_is_busy_errors() {
+    errors.delete_server_is_busy_errors();
   }
 
   // Wrapper for the Errors.is_unrecoverable_error_occurred

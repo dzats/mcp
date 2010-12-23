@@ -23,6 +23,8 @@ protected:
   {
     pthread_mutex_lock(&reader->mutex);
     w->is_present = false;
+    w->status = STATUS_OK;
+    w->is_done = true;
     pthread_cond_signal(&reader->space_ready_cond);
     if (reader->all_writers_done()) {
       pthread_cond_signal(&reader->writers_finished_cond);

@@ -5,12 +5,17 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/param.h> // for MAXPATHLEN
 #include <poll.h> // for poll
 
 #include <fcntl.h>
 #include <dirent.h>
 #include <libgen.h>
+
+#ifndef linux
+#include <machine/atomic.h>
+#endif
 
 #include <stack>
 
@@ -30,8 +35,24 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
   int flags = 0;
   bool has_file_been_shrinked = false; // whether the file has been shrinked
     // during the transmission
+  unsigned previous_bytes_received = *bytes_received;
+  struct timeval previous_timestamp;
+  struct timeval current_timestamp;
+  gettimeofday(&previous_timestamp, NULL);
+  int64_t allowed_to_recv = 4096;
+  int remaining = 0;
+  int count = 0;
+
   while(1) {
-    int count = get_space();
+    if (remaining < 16384) {
+      //SDEBUG("First case\n");
+      count = get_space();
+      remaining = count;
+    } else {
+      //SDEBUG("Second case\n");
+      count = 16384;
+    }
+
 #ifdef BUFFER_DEBUG
     DEBUG("Free space in the buffer: %d bytes\n", count);
 #endif
@@ -101,6 +122,33 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       }
     }
 
+    if (bandwidth != 0) {
+      gettimeofday(&current_timestamp, NULL);
+      unsigned data_received = *bytes_received;
+
+      allowed_to_recv += ((int64_t)bandwidth *
+        (current_timestamp.tv_usec - previous_timestamp.tv_usec)) >> 20;
+      allowed_to_recv += (bandwidth  - (bandwidth >> 5) - (bandwidth >> 6)) *
+        (current_timestamp.tv_sec - previous_timestamp.tv_sec);
+      allowed_to_recv -= data_received - previous_bytes_received;
+      previous_bytes_received = data_received;
+      previous_timestamp = current_timestamp;
+
+      if (allowed_to_recv > 8LL * 1024 * 1024) {
+        allowed_to_recv = 4LL * 1024 * 1024;
+      }
+
+      //DEBUG("allowed_to_recv: %llu\n", allowed_to_recv);
+      if (allowed_to_recv > 1000) {
+        count = min(count, (int)allowed_to_recv);
+      } else if ((unsigned)count > allowed_to_recv) {
+        unsigned time_to_sleep = (((int64_t)count - allowed_to_recv) << 20) /
+          bandwidth;
+        //DEBUG("Sleep for %u\n", time_to_sleep);
+        internal_usleep(time_to_sleep);
+      }
+    }
+
     // Normal data received
     count = recv(sock, rposition(), count, flags);
     if (count > 0) {
@@ -108,6 +156,12 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       checksum.update((unsigned char *)rposition(), count);
       update_reader_position(count);
       total += count;
+      remaining -= count;
+#ifndef linux
+      atomic_add_int(bytes_received, count);
+#else
+      bytes_received += count;
+#endif
       //DEBUG("total: %zu, size: %zu\n", (size_t)total, (size_t)size);
       if (has_file_been_shrinked) {
         // Send the total numbers of bytes back read to the source
@@ -117,10 +171,11 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       } else {
         if (total == size) {
           // The end of the file transmission
+          DEBUG("%lu bytes received\n", (long unsigned)total);
           return;
         }
       }
-    } else if(count == 0) {
+    } else if (count == 0) {
       // End of file
       DEBUG("Unexpected end of transmission for the file %s\n", filename);
       throw ConnectionException(ConnectionException::unexpected_end_of_input);
@@ -335,11 +390,10 @@ int UnicastReceiver::session()
   
           recvn(sock, signature, sizeof(signature));
 #ifndef NDEBUG
-          DEBUG("Received checksum(%u): ", (unsigned)sizeof(signature));
+          SDEBUG("Received checksum  : ");
           MD5sum::display_signature(stdout, signature);
           printf("\n");
-          DEBUG("Calculated checksum(%u)  : ",
-            (unsigned)sizeof(checksum.signature));
+          SDEBUG("Calculated checksum: ");
           MD5sum::display_signature(stdout, checksum.signature);
           printf("\n");
 #endif

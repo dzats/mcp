@@ -1,14 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#include <algorithm>
 #include <exception>
 
 #include "unicast_sender.h"
 #include "log.h"
+
+using namespace std;
 
 // Tries to establish TCP connection with the host 'addr'
 void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException)
@@ -147,11 +151,72 @@ uint64_t UnicastSender::write_to_socket(int sock, uint64_t size)
   return total;
 }
 
+// Writes data (not more that size) from the distributor to sock.
+// Returns the number of bytes sent or (size + 1) on failure
+uint64_t UnicastSender::write_to_socket_with_limited_bandwidth(int sock,
+    uint64_t size)
+{
+  DEBUG("Write file of size %zu to the socket (bandwidth %u)\n",
+    (size_t)size, bandwidth);
+  uint64_t total = 0;
+  int64_t allowed_to_send = 65536;
+  struct timeval previous_timestamp;
+  struct timeval current_timestamp;
+  gettimeofday(&previous_timestamp, NULL);
+  int count = get_data();
+  while (count > 0) {
+#ifdef BUFFER_DEBUG
+    DEBUG("Sending %d bytes of data\n", count);
+#endif
+    gettimeofday(&current_timestamp, NULL);
+    allowed_to_send += (((int64_t)bandwidth *
+      (current_timestamp.tv_usec - previous_timestamp.tv_usec)) >> 20);
+    allowed_to_send += (bandwidth  - (bandwidth >> 5) - (bandwidth >> 6)) *
+      (current_timestamp.tv_sec - previous_timestamp.tv_sec);
+    //DEBUG("count: %u, allowed_to_send: %lld\n", count, allowed_to_send);
+    if (allowed_to_send > 8LL * 1024 * 1024) {
+      allowed_to_send = 4LL * 1024 * 1024;
+    }
+    previous_timestamp = current_timestamp;
+    if (allowed_to_send > 1000LL) {
+      count = min(count, (int)allowed_to_send);
+    } else if ((unsigned)count > allowed_to_send) {
+      register int bytes_to_send = min((int)(count - allowed_to_send), 1000);
+      count = min(count, bytes_to_send);
+      //DEBUG("Sleep for %lld\n", ((int64_t)count << 20) / bandwidth);
+      internal_usleep(((int64_t)count << 20) / bandwidth);
+    }
+  
+    count = write(sock, pointer(), count);
+    
+#ifdef BUFFER_DEBUG
+    DEBUG("%d (%zu) bytes of data sent\n", count, total);
+#endif
+    if (count > 0) {
+      allowed_to_send -= count;
+      total += count;
+      assert(total <= size);
+      update_position(count);
+    } else {
+      if (errno == ENOBUFS) {
+        SDEBUG("ENOBUFS error occurred\n");
+        usleep(200000);
+        continue;
+      }
+      return size + 1;
+    }
+
+    count = get_data();
+  }
+  DEBUG("write_to_file: %zu bytes've been written\n", (size_t)total);
+  return total;
+}
+
 /*
   This is the initialization routine which establish the unicast
   session with one of the destinations.
 */
-int UnicastSender::session_init(const std::vector<Destination>& dst,
+uint8_t UnicastSender::session_init(const std::vector<Destination>& dst,
     int n_sources)
 {
   SDEBUG("UnicastSender::session_init called\n");
@@ -206,25 +271,33 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
             target_address, "Too many retransmissions");
           close(sock);
           sock = -1;
-          return -1;
+          return STATUS_TOO_MANY_RETRANSMISSIONS;
         }
       } else {
         // Fatal error occurred during the session establishing
-        DEBUG("Fatal error received: %s\n", reply_message);
+#ifndef NDEBUG
+        if (h.get_msg_length() != 0) {
+          DEBUG("Error received: %s\n", reply_message);
+        } else {
+          SDEBUG("Error received (no message)\n");
+        }
+#endif
         // Register the error
         reader->errors.add(new Reader::SimpleError(h.get_status(),
           h.get_address(), reply_message, h.get_msg_length()));
+        if (h.get_msg_length() > 0) { free(reply_message); }
+
         if (reader->unicast_sender.status < h.get_status()) {
           reader->unicast_sender.status = h.get_status();
         }
         submit_task();
         close(sock);
         sock = -1;
-        return -1;
+        return h.get_status();
       }
     } while (is_retransmission_required);
     SDEBUG("Connection established\n");
-    return 0;
+    return STATUS_OK;
   } catch (ConnectionException& e) {
     // Transmission error during session initialization
     try {
@@ -233,14 +306,21 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
       char *reply_message;
       ReplyHeader h;
       h.recv_reply(sock, &reply_message, 0);
-      if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
+      while (h.get_status() != STATUS_OK) {
         reader->errors.add(new Reader::SimpleError(h.get_status(),
-          h.get_address(), reply_message, strlen(reply_message)));
-        reader->unicast_sender.status = h.get_status();
-        submit_task();
-        close(sock);
-        sock = -1;
-        return -1;
+          h.get_address(), reply_message, h.get_msg_length()));
+        if (h.get_msg_length() > 0) { free(reply_message); }
+
+        if (reader->unicast_sender.status < h.get_status()) {
+          reader->unicast_sender.status = h.get_status();
+        }
+        if (reader->unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+          submit_task();
+          close(sock);
+          sock = -1;
+          return reader->unicast_sender.status;
+        }
+        h.recv_reply(sock, &reply_message, 0);
       }
     } catch(std::exception& e) {
       // Can't receive an error, generate it
@@ -248,9 +328,10 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
     register_error(STATUS_UNICAST_INIT_ERROR,
       "Can't establish unicast connection with the host %s: %s",
       target_address, e.what());
+    submit_task();
     close(sock);
     sock = -1;
-    return -1;
+    return STATUS_UNICAST_INIT_ERROR;
   }
 }
 
@@ -258,7 +339,7 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
   This is the main routine of the unicast sender. This routine sends
   the files and directories to the next destination.
 */
-int UnicastSender::session()
+uint8_t UnicastSender::session()
 {
   try {
     bool is_trailing = false; // Whether the current task is the trailing one
@@ -287,14 +368,18 @@ int UnicastSender::session()
             SDEBUG("Incorrect checksum, request for a file retransmission\n");
             reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
               reply_message, h.get_msg_length()));
-            if (reader->unicast_sender.status < h.get_status()) {
-              reader->unicast_sender.status = h.get_status();
+            if (h.get_msg_length() > 0) { free(reply_message); }
+
+            if (reader->unicast_sender.status < STATUS_INCORRECT_CHECKSUM) {
+              reader->unicast_sender.status = STATUS_INCORRECT_CHECKSUM;
             }
           } else if(h.get_status() != STATUS_OK) {
             // Fatal error occurred during the connection
             SDEBUG("An error received\n");
             reader->errors.add(new Reader::SimpleError(h.get_status(),
               h.get_address(), reply_message, h.get_msg_length()));
+            if (h.get_msg_length() > 0) { free(reply_message); }
+
             if (reader->unicast_sender.status < h.get_status()) {
               reader->unicast_sender.status = h.get_status();
             }
@@ -303,7 +388,7 @@ int UnicastSender::session()
               submit_task();
               close(sock);
               sock = -1;
-              return -1;
+              return h.get_status();
             }
           }
         }
@@ -327,8 +412,14 @@ int UnicastSender::session()
             op->get_filename() + op->fileinfo.get_name_offset());
           // Send the file
           uint64_t write_result;
-          if ((write_result = write_to_socket(sock,
-              op->fileinfo.get_file_size())) > op->fileinfo.get_file_size()) {
+          if (bandwidth == 0) {
+            write_result = write_to_socket(sock, op->fileinfo.get_file_size());
+          } else {
+            write_result = write_to_socket_with_limited_bandwidth(sock,
+              op->fileinfo.get_file_size());
+          }
+
+          if (write_result > op->fileinfo.get_file_size()) {
             // It's is the connection error throw appropriate exception
             throw ConnectionException(errno);
           }
@@ -381,8 +472,10 @@ int UnicastSender::session()
             SDEBUG("Incorrect checksum, request for a file retransmission\n");
             reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
               reply_message, h.get_msg_length()));
-            if (reader->unicast_sender.status < h.get_status()) {
-              reader->unicast_sender.status = h.get_status();
+            if (h.get_msg_length() > 0) { free(reply_message); }
+
+            if (reader->unicast_sender.status < STATUS_INCORRECT_CHECKSUM) {
+              reader->unicast_sender.status = STATUS_INCORRECT_CHECKSUM;
             }
           } else if(h.get_status() != STATUS_OK) {
             // An error occurred during the connection
@@ -394,10 +487,12 @@ int UnicastSender::session()
               // Finish work in the case of a fatal error
               reader->errors.add(new Reader::SimpleError(h.get_status(),
                 h.get_address(), reply_message, h.get_msg_length()));
+              if (h.get_msg_length() > 0) { free(reply_message); }
+
               submit_task();
               close(sock);
               sock = -1;
-              return -1;
+              return h.get_status();
             } else {
               if (mode == client_mode) {
                 // Display non-fatal errors immediately
@@ -407,6 +502,7 @@ int UnicastSender::session()
                 reader->errors.add(new Reader::SimpleError(h.get_status(),
                   h.get_address(), reply_message, h.get_msg_length()));
               }
+              if (h.get_msg_length() > 0) { free(reply_message); }
             }
           }
         }
@@ -421,10 +517,12 @@ int UnicastSender::session()
       // FIXME: rewrite this (errors can come from both directions)
       char *reply_message;
       ReplyHeader h;
-      do {
-        h.recv_reply(sock, &reply_message, 0);
+      h.recv_reply(sock, &reply_message, 0);
+      while (h.get_status() != STATUS_OK) {
         reader->errors.add(new Reader::SimpleError(h.get_status(),
-          h.get_address(), reply_message, strlen(reply_message)));
+          h.get_address(), reply_message, h.get_msg_length()));
+        if (h.get_msg_length() > 0) { free(reply_message); }
+
         if (reader->unicast_sender.status < h.get_status()) {
           reader->unicast_sender.status = h.get_status();
         }
@@ -432,21 +530,23 @@ int UnicastSender::session()
           submit_task();
           close(sock);
           sock = -1;
-          return -1;
+          return reader->unicast_sender.status;
         }
-      } while (h.get_status() != STATUS_OK);
+        h.recv_reply(sock, &reply_message, 0);
+      }
     } catch(std::exception& e) {
       // Can't receive an error, generate it
     }
     register_error(STATUS_UNICAST_CONNECTION_ERROR,
       "Error during unicast transmission with the host %s: %s",
       target_address, e.what());
+    submit_task();
     close(sock);
     sock = -1;
-    return -1;
+    return STATUS_UNICAST_CONNECTION_ERROR;
   }
 
   close(sock);
   sock = -1;
-  return 0;
+  return STATUS_OK;
 }

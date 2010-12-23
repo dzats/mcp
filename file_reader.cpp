@@ -100,7 +100,9 @@ int FileReader::read_from_file(int fd, off_t size)
 #ifdef BUFFER_DEBUG
     DEBUG("Free space in the buffer: %d bytes\n", count);
 #endif
-    count = read(fd, rposition(), count);
+    if (count > 0) {
+      count = read(fd, rposition(), count);
+    }
     if (count > 0) {
       // Update the checksum
       checksum.update((unsigned char *)rposition(), count);

@@ -135,7 +135,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
   }
 
   if (message_to_send == message &&
-      store_position > n_destinations * 4 + (window_size >> 8) + 7) {
+      store_position > n_destinations * 2 + (window_size >> 10) + 7) {
     /*
       The previlus rude expression means n_destinations * 2 + channel capacity.
       Buffers is filled, perform retransmission for the first unacknowledged
@@ -244,7 +244,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     // Change the window size
     if (ssthresh == UINT_MAX) {
       // Slow start
-      window_size += data_delivered;
+      window_size += data_delivered / 2;
     } else {
       // Congestion avoidance
       window_size += (MAX_UDP_PACKET_SIZE * data_delivered) / window_size;
@@ -279,26 +279,11 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
       DEBUG("Delay is too big!: %u\n", delay);
       delay = 100000;
     }
+#ifdef DETAILED_MULTICAST_DEBUG
     DEBUG("Sleep for %u microseconds\n", delay);
+#endif
     pthread_mutex_unlock(&mutex);
-    // FIXME: Check whether this method of waiting is appropriate
-    if (delay < 1000) {
-      struct timeval till_time;
-      gettimeofday(&till_time, NULL);
-      till_time.tv_usec += delay;
-      till_time.tv_sec += till_time.tv_usec / 1000000;
-      till_time.tv_usec = till_time.tv_usec % 1000000;
-      do {
-        if (delay > 66) {
-          sched_yield();
-        }
-        gettimeofday(&current_time, NULL);
-      } while(current_time.tv_sec < till_time.tv_sec ||
-        current_time.tv_sec == till_time.tv_sec &&
-        current_time.tv_usec < till_time.tv_usec);
-    } else {
-      usleep(delay);
-    }
+    internal_usleep(delay);
     pthread_mutex_lock(&mutex);
   }
 

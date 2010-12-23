@@ -18,6 +18,10 @@
 
 #include <assert.h>
 
+#ifndef linux
+#include <machine/atomic.h>
+#endif
+
 #include <vector>
 #include <set>
 #include <functional>
@@ -188,6 +192,9 @@ void MulticastReceiver::time_wait(uint8_t * const buffer)
   int timeout = MULTICAST_FINAL_TIMEOUT;
   struct timeval initial_time;
   gettimeofday(&initial_time, NULL);
+  union sigval val;
+  val.sival_ptr = NULL;
+  sigqueue(getppid(), SIGUSR1, val);
   SDEBUG("Enter to the TIME_WAIT state\n");
   while (1) {
     DEBUG("wait for %u milliseconds\n", timeout);
@@ -295,6 +302,13 @@ void MulticastReceiver::read_messages()
   uint32_t termination_request_number = 0;
   bool is_missed_sent = false;
   uint32_t previous_retrans = UINT32_MAX;
+
+  // Variables used to limit the bandwidth
+  unsigned previous_bytes_received = *bytes_received;
+  struct timeval previous_timestamp;
+  struct timeval current_timestamp;
+  int64_t allowed_to_recv = MAX_UDP_PACKET_SIZE;
+  gettimeofday(&previous_timestamp, NULL);
 
   struct sockaddr_in client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
@@ -446,11 +460,47 @@ void MulticastReceiver::read_messages()
         continue;
       }
 
+      if (bandwidth != 0) {
+        gettimeofday(&current_timestamp, NULL);
+        unsigned data_received = *bytes_received;
+  
+        allowed_to_recv += ((int64_t)bandwidth *
+          (current_timestamp.tv_usec - previous_timestamp.tv_usec)) >> 20;
+        allowed_to_recv += (bandwidth  - (bandwidth >> 5) - (bandwidth >> 6)) *
+          (current_timestamp.tv_sec - previous_timestamp.tv_sec);
+        allowed_to_recv -= data_received - previous_bytes_received;
+        previous_bytes_received = data_received;
+        previous_timestamp = current_timestamp;
+  
+        if (allowed_to_recv > 8LL * 1024 * 1024) {
+          allowed_to_recv = 4LL * 1024 * 1024;
+        }
+        //DEBUG("allowed_to_recv: %lli\n", allowed_to_recv);
+
+        // This strange condition is added to avoid the multicast connection
+        // been almost completely supresses by the tcp connections.
+        // FIXME: the magic number 21, should be changed to some function
+        // of the tcp's recv buffer size
+        if (allowed_to_recv < -MAX_UDP_PACKET_SIZE * 21) {
+          unsigned time_to_sleep =
+            (((int64_t)MAX_UDP_PACKET_SIZE - allowed_to_recv) << 20) /
+            bandwidth;
+          //DEBUG("Sleep for %u\n", time_to_sleep);
+          internal_usleep(time_to_sleep);
+        }
+      }
+
       // Store the message to be processed (may be later)
       int put_message_result = message_queue.put_message(buffer, len,
         message_number);
       if (put_message_result != 0) {
         missed_packets.insert(message_number);
+      } else {
+#ifndef linux
+        atomic_add_int(bytes_received, len);
+#else
+        bytes_received += len;
+#endif
       }
 
       if (next_message_expected != message_number) {

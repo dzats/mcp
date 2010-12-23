@@ -7,6 +7,33 @@
 
 using namespace std;
 
+// Internal function to inmplement a more precise usleep on FreeBSD
+void internal_usleep(unsigned udelay) {
+  // FIXME: Check whether this method is appropriate
+#ifndef linux
+  if (udelay < 1000) {
+    struct timeval current_time;
+    struct timeval till_time;
+    gettimeofday(&till_time, NULL);
+    till_time.tv_usec += udelay;
+    till_time.tv_sec += till_time.tv_usec / 1000000;
+    till_time.tv_usec = till_time.tv_usec % 1000000;
+    do {
+      if (udelay > 66) {
+        sched_yield();
+      }
+      gettimeofday(&current_time, NULL);
+    } while (current_time.tv_sec < till_time.tv_sec ||
+      current_time.tv_sec == till_time.tv_sec &&
+      current_time.tv_usec < till_time.tv_usec);
+  } else {
+    usleep(udelay);
+  }
+#else
+  usleep(udelay);
+#endif
+}
+
 // Receive 'size' bytes from 'sock' and places them to 'data'
 void recvn(int sock, void *data, size_t size)
 {
@@ -49,6 +76,12 @@ void send_normal_conformation(int sock, uint32_t addr)
 void send_incorrect_checksum(int sock, uint32_t addr)
 {
   ReplyHeader rh(STATUS_INCORRECT_CHECKSUM, addr, 0);
+  sendn(sock, &rh, sizeof(rh), 0);
+}
+
+void send_server_is_busy(int sock, uint32_t addr)
+{
+  ReplyHeader rh(STATUS_SERVER_IS_BUSY, addr, 0);
   sendn(sock, &rh, sizeof(rh), 0);
 }
 

@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #include <signal.h> // for SIGPIPE
 
@@ -43,8 +44,10 @@ struct MulticastConnection
   uint32_t source; // Source of the multicast connection
   uint32_t session_id; // Session id of the multicast connection
   pid_t  pid; // PID of the process handling the 
+  mutable bool is_in_time_wait; // Whether this connection is in the
+    // time wait state
   MulticastConnection(uint32_t src, uint32_t sid, pid_t p) : source(src),
-    session_id(sid), pid(p) {};
+    session_id(sid), pid(p), is_in_time_wait(false) {};
 
   bool operator==(const MulticastConnection& arg) const {
     return source == arg.source && session_id == arg.session_id;
@@ -55,13 +58,30 @@ struct MulticastConnection
   }
 };
 
+// Function object to match Multicst Connection with particular PID
+struct MulticastConnectionPidCompare
+{
+  pid_t pid;
+public:
+  MulticastConnectionPidCompare(pid_t p) : pid(p) {}
+  bool operator()(const MulticastConnection& arg) {
+    return pid == arg.pid;
+  }
+};
+
 using namespace std;
 
 // Global variables
 uid_t uid; // User id of the daemon
 uid_t gid; // Group id of the daemon
 char *homedir; // Home directory of the daemon
+
 set<MulticastConnection> multicast_sessions; // Established multicast sessions
+
+sig_atomic_t max_n_connections; // Max number of the simultaneous
+  // connections allowed to this server
+volatile sig_atomic_t n_connections; // Number of currently established
+  // connections
 
 void usage_and_exit(char *name)
 {
@@ -77,12 +97,16 @@ void usage_and_exit(char *name)
   "\t-P port\n"
   "\t\tSpecify port the server will use for multicast connections\n"
   "\t\tinstead of the default port (" NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
-  "\t-u UID\tChange UID, GID and home directory for the process\n\n"
-  "\t-U\tUnicast only (don't accept multicast connections)\n\n"
-  "\t-m\tMulticast only (don't accept unicast connections)\n\n"
+  "\t-c number\n"
+  "\t\tSet limit to the maximum number of simultaneous connections.\n\n"
+  "\t-b bytes\n"
+  "\t\tSet limit for the total incoming bandwidth in bytes per second.\n\n"
+  "\t-u UID\tChange UID, GID and home directory for the process.\n\n"
+  "\t-U\tUnicast only (don't accept multicast connections).\n\n"
+  "\t-m\tMulticast only (don't accept unicast connections).\n\n"
   "\t-d\tRun server in the debug mode (don't go to the background,\n"
   "\t\tlog messages to the standard out/error, and don't fork on\n"
-  "\t\tincoming connection.\n");
+  "\t\tincoming connection).\n");
   exit(EXIT_FAILURE);
 }
 
@@ -139,17 +163,48 @@ void sigchld_handler(int signum)
   register int pid;
   while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
     // Delete the closed multicast session
-    for (set<MulticastConnection>::iterator i = multicast_sessions.begin();
-        i != multicast_sessions.end(); ++i) {
-      if (i->pid == pid) {
-        multicast_sessions.erase(i);
-        break;
+    set<MulticastConnection>::iterator i = find_if(multicast_sessions.begin(),
+      multicast_sessions.end(), MulticastConnectionPidCompare(pid));
+    if (i != multicast_sessions.end()) {
+      if (i->is_in_time_wait) {
+        ++n_connections;
       }
+      multicast_sessions.erase(i);
     }
+    --n_connections;
 
     // It is wrong to call printf here
     DEBUG("Child %d picked up\n", pid);
+    DEBUG("Number of active connections: %u.\n", n_connections);
   };
+}
+
+// The SIGUSR1 handler, catches signals that have been sent by the 
+// multicast receivers that moved to the time wait state
+void sigusr1_sigaction(int signum, siginfo_t *info, void *uap)
+{
+  set<MulticastConnection>::iterator i = find_if(multicast_sessions.begin(),
+    multicast_sessions.end(), MulticastConnectionPidCompare(info->si_pid));
+  if (i != multicast_sessions.end()) {
+    DEBUG("Process %u entered to the time wait state\n", info->si_pid);
+    i->is_in_time_wait = true;
+    --n_connections;
+  }
+
+ // It is wrong to call printf here
+ DEBUG("Signal %u from %u received.\n", signum, info->si_pid);
+ DEBUG("Number of active connections: %u.\n", n_connections);
+}
+
+// Send a UDP datagram
+static inline int send_datagram(int sock, uint8_t *message, size_t size,
+    const struct sockaddr_in *addr) {
+  register int sendto_result;
+  do {
+    sendto_result = sendto(sock, message, size, 0, (struct sockaddr *)addr,
+      sizeof(*addr));
+  } while (sendto_result < 0 && errno == ENOBUFS);
+  return sendto_result;
 }
 
 // Sends the multicast_init_reply message to 'destination_addr'
@@ -179,10 +234,33 @@ static int send_multicast_init_reply(int sock, uint32_t session_id,
 
   // Send the reply
   SDEBUG("Send the reply\n");
-  if (sendto(sock, reply_message, sizeof(reply_message), 0,
-    (struct sockaddr *)destination_addr, sizeof(*destination_addr)) <= 0) {
+  if (send_datagram(sock, reply_message, sizeof(reply_message),
+      destination_addr) < 0) {
     ERROR("Can't send the session initialization reply: %s\n",
       strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+// Sends the multicast STATUS_SERVER_IS_BUSY error message
+static int send_multicast_server_is_busy(int sock, uint32_t session_id,
+    uint32_t number, const struct sockaddr_in *destination_addr,
+    uint32_t local_address)
+{
+  // Compose the reply message
+  uint8_t error_message[sizeof(MulticastMessageHeader) + sizeof(ReplyHeader)];
+  MulticastMessageHeader *mmh = new(error_message)
+    MulticastMessageHeader(MULTICAST_ERROR_MESSAGE, session_id);
+  mmh->set_number(number);
+
+  new(mmh + 1) ReplyHeader(STATUS_SERVER_IS_BUSY, local_address, 0);
+
+  // Send the error
+  if (send_datagram(sock, error_message, sizeof(error_message),
+      destination_addr) < 0) {
+    // Some internal error occurred
+    ERROR("Can't send an error: %s\n", strerror(errno));
     return -1;
   }
   return 0;
@@ -275,6 +353,7 @@ int main(int argc, char **argv)
 #ifdef USE_MULTICAST
   unsigned multicast_sender_number = 0;
 #endif
+  unsigned bandwidth = 0; // bandwidth (bytes per 1.048576 seconds)
   uid = getuid();
   gid = getgid();
   homedir = getenv("HOME");
@@ -291,7 +370,7 @@ int main(int argc, char **argv)
 
   // Parse the command line options
   int ch;
-  while ((ch = getopt(argc, argv, "a:p:P:u:Umdh")) != -1 ) {
+  while ((ch = getopt(argc, argv, "a:p:P:b:c:u:Umdh")) != -1 ) {
     switch (ch) {
       case 'a': // Address specified
         if ((address = inet_addr(optarg)) == INADDR_NONE) {
@@ -309,8 +388,31 @@ int main(int argc, char **argv)
         }
         break;
       case 'P': // Multicast port
-        if ((multicast_port = atoi(optarg)) == 0) {
+        multicast_port = atoi(optarg);
+        if (multicast_port == 0) {
           ERROR("Invalid port: %s\n", optarg);
+          exit(EXIT_FAILURE);
+        }
+        break;
+      case 'b': // Limit the receiver's bandwidth
+        bandwidth = atoi(optarg);
+        if (bandwidth != 0) {
+          // Change the bandwidth's unit of measurement
+          uint64_t b = bandwidth;
+          b = (b << 20) / 1000000;
+          bandwidth = b;
+          DEBUG("Bandwidth is set to %u bytes per 1.048576 seconds\n",
+            bandwidth);
+        } else {
+          ERROR("Invalid value of the argument '-b': %s\n", optarg);
+          exit(EXIT_FAILURE);
+        }
+        break;
+      case 'c': // Limit the maximum number of simultaneous
+          // connections allowed
+        max_n_connections = atoi(optarg);
+        if (max_n_connections == 0) {
+          ERROR("Invalid value of the argument '-c': %s\n", optarg);
           exit(EXIT_FAILURE);
         }
         break;
@@ -366,15 +468,31 @@ int main(int argc, char **argv)
 #endif
 
   struct sigaction sigchld_action;
-  memset(&sigchld_action, 0, sizeof(sigchld_action));
   sigchld_action.sa_handler = sigchld_handler;
   sigchld_action.sa_flags = SA_RESTART;
+  sigemptyset(&sigchld_action.sa_mask);
+  sigaddset(&sigchld_action.sa_mask, SIGUSR1);
   if (sigaction(SIGCHLD, &sigchld_action, NULL)) {
     ERROR("sigaction: %s\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
 
-  int unicast_sock = 0;
+  struct sigaction sigusr1_action;
+  sigusr1_action.sa_sigaction = sigusr1_sigaction;
+  sigusr1_action.sa_flags = SA_RESTART | SA_SIGINFO;
+  sigemptyset(&sigusr1_action.sa_mask);
+  sigaddset(&sigusr1_action.sa_mask, SIGCHLD);
+  if (sigaction(SIGUSR1, &sigusr1_action, NULL)) {
+    ERROR("sigaction: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  sigset_t multicast_sessions_changers;
+  sigemptyset(&multicast_sessions_changers);
+  sigaddset(&multicast_sessions_changers, SIGCHLD);
+  sigaddset(&multicast_sessions_changers, SIGUSR1);
+
+  int unicast_sock = -1;
   unsigned n_multicast_sockets = 0;
   int *multicast_sockets = NULL;
   struct pollfd *pfds;
@@ -411,13 +529,22 @@ int main(int argc, char **argv)
       }
   
       const int on = 1;
+#ifdef linux
       if (setsockopt(multicast_sockets[i], SOL_SOCKET, SO_REUSEADDR, &on,
           sizeof(on)) != 0) {
         ERROR("Can't set the SO_REUSEADDR option to the socket: %s\n",
           strerror(errno));
         exit(EXIT_FAILURE);
       }
-  
+#else
+      if (setsockopt(multicast_sockets[i], SOL_SOCKET, SO_REUSEPORT, &on,
+          sizeof(on)) != 0) {
+        ERROR("Can't set the SO_REUSEPORT option to the socket: %s\n",
+          strerror(errno));
+        exit(EXIT_FAILURE);
+      }
+#endif
+
       // Bind UDP socket
       struct sockaddr_in servaddr;
       memset(&servaddr, 0, sizeof(servaddr));
@@ -505,6 +632,15 @@ int main(int argc, char **argv)
     udp_buffer = (char *)malloc(UDP_MAX_LENGTH);
   }
 
+  // Initialize the shared memory to implement the incoming bandwidth
+  // limitation
+  void *shmem = mmap(NULL, sizeof(unsigned), PROT_READ | PROT_WRITE,
+    MAP_ANON | MAP_SHARED, -1, 0);
+  if (shmem == MAP_FAILED) {
+    ERROR("Can't map a shared memory: %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
   // The main routine of the server
   // Wait for incoming connections in the infinite loop
   while (1) {
@@ -568,11 +704,24 @@ int main(int argc, char **argv)
         }
   
         if (matches.size() > 0) {
-          // Check if the connection is already established
-          if (multicast_sessions.find(MulticastConnection(
-              multicast_sender_addr.sin_addr.s_addr,
-              mmh->get_session_id(), 0)) == multicast_sessions.end()) {
-            // At least one of the addresses found, establish connection.
+          // At least one of the addresses found, establish connection.
+          sigprocmask(SIG_BLOCK, &multicast_sessions_changers, NULL);
+          set<MulticastConnection>::iterator established_session =
+            multicast_sessions.find(MulticastConnection(
+            multicast_sender_addr.sin_addr.s_addr, mmh->get_session_id(), 0));
+          
+          if (established_session == multicast_sessions.end() ||
+              established_session->is_in_time_wait) {
+            sigprocmask(SIG_UNBLOCK, &multicast_sessions_changers, NULL);
+            // Connection has not been already established for this session
+            if (max_n_connections > 0 &&
+                n_connections >= max_n_connections) {
+              // Server is busy
+              send_multicast_server_is_busy(multicast_sockets[sock_num],
+                mmh->get_session_id(), mmh->get_number(), &source_addr,
+                local_address);
+              continue;
+            }
             // Try availability of the ephemeral port
             int ephemeral_sock;
             ephemeral_sock = socket(PF_INET, SOCK_DGRAM, 0);
@@ -602,39 +751,45 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
               }
             }
-            send_multicast_init_reply(multicast_sockets[sock_num],
-              mmh->get_session_id(), mmh->get_number(), matches, &source_addr,
-              reply_delay);
-
-            // Create a new process, that will handle this connection
-            pid_t pid = fork();
-            if (pid == 0) {
-              for (unsigned i = 0; i < n_multicast_sockets; ++i) {
-                close(multicast_sockets[i]);
+            if (send_multicast_init_reply(multicast_sockets[sock_num],
+                mmh->get_session_id(), mmh->get_number(), matches,
+                &source_addr, reply_delay) == 0) {
+              // Create a new process, that will handle this connection
+              pid_t pid = fork();
+              if (pid == 0) {
+                for (unsigned i = 0; i < n_multicast_sockets; ++i) {
+                  close(multicast_sockets[i]);
+                }
+                close(unicast_sock);
+                // Create a MulticastReceiver object
+                MulticastReceiver *multicast_receiver = new MulticastReceiver(
+                  ephemeral_sock, shmem, source_addr, mmh->get_session_id(),
+                  local_address, addresses[sock_num], bandwidth);
+                int status = multicast_receiver->session();
+                // finish the work
+                delete multicast_receiver;
+                DEBUG("Process %u finished\n", getpid());
+                exit(status);
+              } else if (pid > 0) {
+                // Session established, continue work
+                ++n_connections;
+                close(ephemeral_sock);
+                sigprocmask(SIG_BLOCK, &multicast_sessions_changers, NULL);
+                multicast_sessions.insert(MulticastConnection(
+                  multicast_sender_addr.sin_addr.s_addr,
+                  mmh->get_session_id(), pid));
+                sigprocmask(SIG_UNBLOCK, &multicast_sessions_changers, NULL);
+              } else {
+                ERROR("fork returned the error: %s\n", strerror(errno));
+                exit(EXIT_FAILURE);
               }
-              close(unicast_sock);
-              // Create a MulticastReceiver object
-              MulticastReceiver *multicast_receiver =
-                new MulticastReceiver(ephemeral_sock, source_addr,
-                mmh->get_session_id(), local_address, addresses[sock_num]);
-              int status = multicast_receiver->session();
-              // finish the work
-              delete multicast_receiver;
-              DEBUG("Process %u finished\n", getpid());
-              exit(status);
-            } else if (pid > 0) {
-              // Session established, continue work
-              close(ephemeral_sock);
-              multicast_sessions.insert(MulticastConnection(
-                multicast_sender_addr.sin_addr.s_addr,
-                mmh->get_session_id(), pid));
             } else {
-              ERROR("fork returned the error: %s\n", strerror(errno));
-              exit(EXIT_FAILURE);
+              close(ephemeral_sock);
             }
           } else {
             DEBUG("Session already established (number of sessions: %zu).\n",
               multicast_sessions.size());
+            sigprocmask(SIG_UNBLOCK, &multicast_sessions_changers, NULL);
             send_multicast_init_reply(multicast_sockets[sock_num],
               mmh->get_session_id(), mmh->get_number(), matches,
               &source_addr, reply_delay);
@@ -652,10 +807,25 @@ int main(int argc, char **argv)
         ERROR("accept call failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
       } else {
+        if (max_n_connections > 0 && n_connections >= max_n_connections) {
+          // Limit to the number of the allowed connections reached.
+          try {
+            send_server_is_busy(client_sock,
+              ntohl(unicast_sender_addr.sin_addr.s_addr));
+          } catch(ConnectionException& e) {
+            ERROR("Can't send a message to the immediate source: %s\n",
+              e.what());
+            // The TCP connection is broken. We can't deliver the error to
+            // the source.
+          }
+          close(client_sock);
+          continue;
+        }
         if (!debug_mode) {
           // Implement the forked server
           pid_t pid = fork();
           if (pid > 0) {
+            ++n_connections;
             // Parent process
             close(client_sock);
             // Return to the accept call
@@ -679,7 +849,8 @@ int main(int argc, char **argv)
 #endif
         // Session initialization
         // create and initialize the unicast receiver
-        UnicastReceiver *unicast_receiver = new UnicastReceiver();
+        UnicastReceiver *unicast_receiver = new UnicastReceiver(shmem,
+          bandwidth);
         UnicastSender *unicast_sender = NULL;
         MulticastSender *multicast_sender = NULL;
         pthread_t file_writer_thread;
@@ -690,100 +861,108 @@ int main(int argc, char **argv)
 
         if (unicast_receiver->session_init(client_sock) != 0) {
           SERROR("Can't get the initial data from the server\n");
-          exit(EXIT_FAILURE);
-        }
-
-        FileWriter *file_writer = new FileWriter(unicast_receiver,
-          unicast_receiver->flags); 
-  
-        const vector<Destination> *remaining_dst;
-#ifdef USE_MULTICAST
-        if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0) {
-          multicast_sender = MulticastSender::create_and_initialize(
-            unicast_receiver->destinations, &remaining_dst,
-            unicast_receiver->n_sources, false, unicast_receiver,
-            MulticastSender::server_mode, multicast_port,
-            multicast_sender_number);
-          ++multicast_sender_number;
-          if (remaining_dst == NULL) {
-            // Some error occurred during the multicast sender initialization
-            unicast_receiver->send_errors(client_sock);
-            exit(EXIT_FAILURE);
-          }
-        } else {
-          remaining_dst = &unicast_receiver->destinations;
-        }
-
-        // FIXME: some other evaluation should done be here
-        if (remaining_dst->size() < unicast_receiver->destinations.size()) {
-          // Start the multicast sender
-          int error;
-          error = pthread_create(&multicast_sender_thread, NULL,
-            multicast_sender_routine, (void *)multicast_sender);
-          if (error != 0) {
-            ERROR("Can't create a new thread: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
-          }
-          is_multicast_sender_started = true;
-        }
-#else
-        remaining_dst = &unicast_receiver->destinations;
-#endif
-  
-        // Run the unicast sender sender
-        if (remaining_dst->size() > 0) {
-          is_unicast_sender_started = true;
-          unicast_sender = new UnicastSender(unicast_receiver,
-            UnicastSender::server_mode, unicast_port, unicast_receiver->flags);
-          SDEBUG("Initialize the unicast sender thread\n");
-          int retval;
-          if ((retval = unicast_sender->session_init(*remaining_dst,
-              unicast_receiver->n_sources)) == 0) {
-            // Start the unicast sender
-            int error;
-            error = pthread_create(&unicast_sender_thread, NULL,
-              unicast_sender_routine, unicast_sender);
-            if (error != 0) {
-              ERROR("Can't create a new thread: %s\n",
-                strerror(errno));
-              exit(EXIT_FAILURE);
-            }
-          } else {
-            // An error occurred during the unicast session initialization.
-            // About this error will be reported later
-            DEBUG("Session initialization failed: %s\n", strerror(retval));
-            delete unicast_sender;
-            unicast_sender = NULL;
-          }
-        }
-  
-        // Check whether some errors occurred
-        try {
-          if (unicast_receiver->reader.status >= STATUS_FIRST_FATAL_ERROR ||
-              unicast_receiver->unicast_sender.is_present &&
-              unicast_receiver->unicast_sender.status >=
-              STATUS_FIRST_FATAL_ERROR ||
-              unicast_receiver->multicast_sender.is_present &&
-              unicast_receiver->multicast_sender.status >=
-              STATUS_FIRST_FATAL_ERROR) {
-            // A fatal error occurred
-            unicast_receiver->send_errors(client_sock);
-            if (!debug_mode) {
-              return EXIT_FAILURE;
-            } else {
-              continue;
-            }
-          }
-        } catch (ConnectionException& e) {
-          ERROR("Can't send a message to the immediate source: %s\n", e.what());
-          // The TCP connection is broken.  All we can do,
-          // it just silently exit.
+          unicast_receiver->send_errors(client_sock);
+          delete unicast_receiver;
           if (!debug_mode) {
             return EXIT_FAILURE;
           } else {
             continue;
           }
         }
+
+        const vector<Destination> *remaining_dst;
+        try {
+#ifdef USE_MULTICAST
+          if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0) {
+            multicast_sender = MulticastSender::create_and_initialize(
+              unicast_receiver->destinations, &remaining_dst,
+              unicast_receiver->n_sources, false, unicast_receiver,
+              MulticastSender::server_mode, multicast_port,
+              0 /* bandwidth */, multicast_sender_number);
+            ++multicast_sender_number;
+            if (remaining_dst == NULL) {
+              // Some error occurred during the multicast sender initialization
+              unicast_receiver->send_errors(client_sock);
+              delete unicast_receiver;
+              if (!debug_mode) {
+                return EXIT_FAILURE;
+              } else {
+                continue;
+              }
+            }
+          } else {
+            remaining_dst = &unicast_receiver->destinations;
+          }
+
+          // FIXME: some other evaluation should done be here
+          if (remaining_dst->size() < unicast_receiver->destinations.size()) {
+            // Start the multicast sender
+            int error;
+            error = pthread_create(&multicast_sender_thread, NULL,
+              multicast_sender_routine, (void *)multicast_sender);
+            if (error != 0) {
+              ERROR("Can't create a new thread: %s\n", strerror(errno));
+              exit(EXIT_FAILURE);
+            }
+            is_multicast_sender_started = true;
+          }
+#else
+          remaining_dst = &unicast_receiver->destinations;
+#endif
+  
+          // Run the unicast sender sender
+          if (remaining_dst->size() > 0) {
+            is_unicast_sender_started = true;
+            unicast_sender = new UnicastSender(unicast_receiver,
+              UnicastSender::server_mode, unicast_port,
+              unicast_receiver->flags, 0 /* bandwidth */);
+            SDEBUG("Initialize the unicast sender thread\n");
+            int retval;
+            retval = unicast_sender->session_init(*remaining_dst,
+              unicast_receiver->n_sources);
+            if (retval == STATUS_OK) {
+              // Start the unicast sender
+              int error;
+              error = pthread_create(&unicast_sender_thread, NULL,
+                unicast_sender_routine, unicast_sender);
+              if (error != 0) {
+                ERROR("Can't create a new thread: %s\n",
+                  strerror(errno));
+                exit(EXIT_FAILURE);
+              }
+            } else {
+              // An error occurred during the unicast session initialization.
+              // About this error will be reported later
+              SDEBUG("Session initialization failed\n");
+              unicast_receiver->send_errors(client_sock);
+              if (multicast_sender != NULL) {
+                delete multicast_sender;
+              }
+              delete unicast_sender;
+              delete unicast_receiver;
+              if (!debug_mode) {
+                return EXIT_FAILURE;
+              } else {
+                continue;
+              }
+            }
+          }
+        } catch (ConnectionException& e) {
+          ERROR("Can't send a message to the immediate source: %s\n", e.what());
+          // The TCP connection is broken.  All we can do, just silently exit.
+          if (multicast_sender != NULL) { delete multicast_sender; }
+          delete unicast_sender;
+          delete unicast_receiver;
+
+          if (!debug_mode) {
+            return EXIT_FAILURE;
+          } else {
+            continue;
+          }
+        }
+
+        FileWriter *file_writer = new FileWriter(unicast_receiver,
+          unicast_receiver->flags); 
   
         // Start the file writer thread
         file_writer->init(unicast_receiver->path, unicast_receiver->path_type,
@@ -809,7 +988,6 @@ int main(int argc, char **argv)
         }
   
         SDEBUG("Session finished, terminate the server\n");
-        close(client_sock);
         if (remaining_dst != NULL &&
             remaining_dst != &unicast_receiver->destinations) {
           delete remaining_dst;

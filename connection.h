@@ -9,7 +9,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-
 #ifdef linux
 #include <endian.h>
 #include <byteswap.h>
@@ -42,7 +41,7 @@
 #define MULTICAST_PORT 6879 // default UDP port used for the multicast
   // connections
 #define MAX_ERROR_LENGTH 1200 // max length of the error messages
-#define DEFAULT_MULTICAST_ADDR "224.0.0.78"
+#define DEFAULT_MULTICAST_ADDR "239.250.17.7"
 #define UDP_MAX_LENGTH 65536 // Max length for a UDP datagram
 #define MAX_UDP_PACKET_SIZE 1472 // Max length for an unfragmented UDP datagram
 #define UDP_PACKET_DATA_OVERHEAD 28 // IP header + UDP header
@@ -60,7 +59,8 @@
 #define STATUS_MULTICAST_CONNECTION_ERROR 131
 #define STATUS_TOO_MANY_RETRANSMISSIONS 132
 #define STATUS_FATAL_DISK_ERROR 133
-#define STATUS_UNKNOWN_ERROR 134
+#define STATUS_SERVER_IS_BUSY 150
+#define STATUS_UNKNOWN_ERROR 171
 
 // Types of the multicast messages
 #define MULTICAST_INIT_REQUEST 0xfb47a6c1
@@ -342,15 +342,18 @@ static inline uint64_t ntoh64(uint64_t arg)
 #endif
 }
 
+// Internal function to inmplement a more precise usleep on FreeBSD
+void internal_usleep(unsigned udelay);
+
 /*
-  Helper functions to work the unicast connection
+  Helper functions for unicast connections
 */
 
 // The exception indicating an error in work with TCP connections
 class ConnectionException : public std::exception
 {
 public:
-  enum Errors { unexpected_end_of_input = 0, corrupted_data_received = -1 };
+  enum Errors { unexpected_end_of_input = -1, corrupted_data_received = -2 };
   int error;
   ConnectionException(int e) : error(e) {}
   const char* what() const throw()
@@ -374,6 +377,7 @@ void sendn(int sock, const void *data, size_t size, int flags);
 
 void send_normal_conformation(int sock, uint32_t addr);
 void send_incorrect_checksum(int sock, uint32_t addr);
+void send_server_is_busy(int sock, uint32_t addr);
 
 // Returns internet addresses, which the host has
 // The returned value should be futher explicitly deleted.

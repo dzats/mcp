@@ -26,6 +26,10 @@ class MulticastReceiver
 #endif
 
   int sock; // Socket used for connection
+  volatile unsigned *bytes_received; // number of bytes received (from all
+    // the clients)
+  unsigned bandwidth; // total incoming bandwidth (for all the clients)
+
   const struct sockaddr_in& source_addr; // Address of the multicast sender
   uint32_t session_id; // id of the multicast sender
   uint32_t local_address; // local IP address which the session establish with
@@ -87,23 +91,24 @@ class MulticastReceiver
   // Wrapper function to run the read_messages method in a separate thread
   static void* read_messages_wrapper(void *arg);
 public:
-  MulticastReceiver(int s, const struct sockaddr_in& saddr,
-      uint32_t sid, uint32_t local_addr, uint32_t interface_addr) :
-      sock(s), source_addr(saddr), session_id(sid),
+  MulticastReceiver(int s,
+      void *shared_mem,
+      const struct sockaddr_in& saddr,
+      uint32_t sid,
+      uint32_t local_addr,
+      uint32_t interface_addr,
+      unsigned bw) :
+      sock(s), bandwidth(bw), source_addr(saddr), session_id(sid),
       local_address(local_addr), interface_address(interface_addr),
       path(NULL), n_sources(0), next_message_expected(0), fd(-1),
-      filename(NULL) {}
+      filename(NULL) {
+    bytes_received = (volatile unsigned *)shared_mem;
+  }
   ~MulticastReceiver()
   {
-    if (path != NULL) {
-      free(path);
-    }
-    if (fd != -1) {
-      close(fd);
-    }
-    if (filename != NULL) {
-      free(filename);
-    }
+    if (path != NULL) { free(path); }
+    if (fd != -1) { close(fd); }
+    if (filename != NULL) { free(filename); }
     close(sock);
   }
 
