@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <math.h>
+
 #include <pthread.h>
 #include <sys/time.h>
 
@@ -25,6 +27,10 @@ MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
   target_addresses = new uint32_t[n_destinations];
   round_trip_times = new unsigned[n_destinations];
   max_round_trip_time = 0;
+  losses = new LossInformation[n_destinations];
+  max_loss_event_rate = 0;
+  destination_with_max_loss_event_rate = 0;
+
   for (unsigned i = 0; i < n_destinations; ++i) {
     target_addresses[i] = targets[i].addr;
     round_trip_times[i] = rtts[i];
@@ -129,7 +135,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
   }
 
   if (message_to_send == message &&
-      store_position > n_destinations * 2 + (window_size >> 9) + 7) {
+      store_position > n_destinations * 4 + (window_size >> 8) + 7) {
     /*
       The previlus rude expression means n_destinations * 2 + channel capacity.
       Buffers is filled, perform retransmission for the first unacknowledged
@@ -227,10 +233,13 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     ((current_time.tv_sec - last_data_on_flow_evaluation.tv_sec) * 1000000 +
     current_time.tv_usec - last_data_on_flow_evaluation.tv_usec)) /
     max_round_trip_time;
+#ifdef DETAILED_MULTICAST_DEBUG
+  DEBUG("data_delivered: %u\n", data_delivered);
+#endif
   if (data_delivered > data_on_flow) {
     data_delivered = data_on_flow;
   }
-  // Some limitation to avoid unlimited grouth of window_size
+  // Limitation here is to avoid overflow of window_size
   if (window_size < INT32_MAX) {
     // Change the window size
     if (ssthresh == UINT_MAX) {
@@ -264,12 +273,15 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     // Delay the packet to avoid congestion
     // FIXME: Be careful to avoid overflow in the following expression
     useconds_t delay = max_round_trip_time *
-      (((data_on_flow - window_size) << 12) / window_size) >> 12;
+      (((data_on_flow - window_size) << 12) / data_on_flow) >> 12;
     // FIXME: Check whether this kind of protection is really required
-    if (delay > 1000000) {
-      delay = 1000000;
+    if (delay > 100000) {
+      DEBUG("Delay is too big!: %u\n", delay);
+      delay = 100000;
     }
+    DEBUG("Sleep for %u microseconds\n", delay);
     pthread_mutex_unlock(&mutex);
+    // FIXME: more smooth method of waiting can be required here
     usleep(delay);
     pthread_mutex_lock(&mutex);
   }
@@ -348,7 +360,7 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     buffer[offset]->timestamp.tv_sec = 0;
   }
 
-  if (termination_message != 0 &&
+  if (termination_message != NULL &&
       first_to_acknowledge[destination] >= store_position) {
     // Remove distination from 'termination_message'
     uint32_t *hosts_begin = (uint32_t *)((uint8_t *)termination_message +
@@ -356,7 +368,7 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     uint32_t *hosts_end = (uint32_t *)((uint8_t *)termination_message +
       termination_message_size); 
     uint32_t *i = find(hosts_begin, hosts_end,
-      target_addresses[destination]);
+      htonl(target_addresses[destination]));
     if (i != hosts_end) {
       *i = *(hosts_end - 1);
       --termination_message_size;
@@ -385,6 +397,18 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
     }
   }
 
+#ifdef USE_EQUATION_BASED_CONGESTION_CONTROL
+  if ((unsigned)destination == destination_with_max_loss_event_rate &&
+    max_loss_event_rate > 0 &&
+    number > losses[destination].last_packet) {
+    adjust_loss_rate(destination, 0,
+      number - losses[destination].last_packet +
+      losses[destination].n_errors_previous);
+    losses[destination].last_packet = number;
+    losses[destination].n_errors_previous = 0;
+  }
+#endif
+
   if (termination_message != NULL) {
     if (store_position == 0) {
       SDEBUG("Multicast transmission finished\n");
@@ -398,6 +422,53 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
   pthread_mutex_unlock(&mutex);
   return 0;
 }
+
+#ifdef USE_EQUATION_BASED_CONGESTION_CONTROL
+// Changes the loss event rate for particular destination and possibly
+// the max_loss_event_rate
+void MulticastSendQueue::adjust_loss_rate(int destination,
+    double new_rate, unsigned new_interval) {
+  register double rate = losses[destination].loss_event_rate;
+  register unsigned interval = losses[destination].measured_interval;
+  
+  if (new_rate == 0.0) {
+    losses[destination].loss_event_rate =
+      (rate * interval + new_rate * new_interval * 2) /
+      (interval + new_interval * 2);
+  } else {
+    if (losses[destination].loss_event_rate > 0) {
+      losses[destination].loss_event_rate = rate * (5.0/6.0) +
+        new_rate * (1.0/6.0);
+    } else {
+      losses[destination].loss_event_rate = new_rate;
+    }
+  }
+
+  assert(rate <= 1);
+  losses[destination].measured_interval += new_interval;
+  if (losses[destination].measured_interval >
+      LossInformation::MAX_INTERVAL_LENGTH) {
+    losses[destination].measured_interval =
+      LossInformation::MAX_INTERVAL_LENGTH;
+  }
+
+  // Adjust max loss event rate
+  if (destination_with_max_loss_event_rate == (unsigned)destination &&
+      max_loss_event_rate > losses[destination].loss_event_rate) {
+    max_loss_event_rate = losses[0].loss_event_rate;
+    destination_with_max_loss_event_rate = 0;
+    for (unsigned i = 1; i < n_destinations; ++i) {
+      if (max_loss_event_rate < losses[i].loss_event_rate) {
+        max_loss_event_rate = losses[i].loss_event_rate;
+        destination_with_max_loss_event_rate = i;
+      }
+    }
+  } else if (max_loss_event_rate < losses[destination].loss_event_rate) {
+    max_loss_event_rate = losses[destination].loss_event_rate;
+    destination_with_max_loss_event_rate = destination;
+  }
+}
+#endif
 
 // Function registers that some of the packets has been missed
 void MulticastSendQueue::add_missed_packets(uint32_t number,
@@ -413,6 +484,7 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
     ((MulticastMessageHeader *)buffer.front()->message)->get_number(),
     number);
   assert(offset < store_position);
+  pthread_mutex_lock(&mutex);
   if (offset < store_position && buffer[offset]->timestamp.tv_sec) {
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
@@ -436,33 +508,79 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
         round_trip_times + n_destinations);
     }
     //assert(max_round_trip_time < 200000);
-    //buffer[offset]->timestamp.tv_sec = 0;
   }
 
   if (numbers != end) {
-    // Change window size if there were no messages about missed packets
-    // recently (during RTT)
-  	// FIXME: Check whether this algorithm is appropriate
-#if 0
-    if (number - last_packet_caused_congestion <
-        UINT32_MAX - MAX_EXPECTED_WINDOW_SIZE) {
-#endif
-      ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
-      window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
-#ifdef DETAILED_MULTICAST_DEBUG
-      DEBUG("New window size: %u\n", window_size);
-#endif
-#if 0
-      last_packet_caused_congestion = 
-        ((MulticastMessageHeader *)buffer[store_position - 1]->message)->get_number();
-    }
-#endif
-
     end -= 2;
-    pthread_mutex_lock(&mutex);
+#ifdef USE_EQUATION_BASED_CONGESTION_CONTROL
+    unsigned n_errors = 0;
+#endif
     while (numbers <= end) {
       uint32_t i = ntohl(*numbers);
       ++numbers;
+
+#if 0
+    // Obsoleted code that estimates loss_event_rate for particular destination
+    //if (numbers == end + 1) {
+      // Take the error interval into account, to change the window size
+      register unsigned interval = ntohl(*(numbers - 1)) -
+        losses[destination].last_packet;
+      register unsigned first_interval = losses[destination].first_interval;
+      losses[destination].intervals[first_interval] = 
+        ntohl(*(numbers - 1)) - losses[destination].last_packet;
+      if (losses[destination].intervals[first_interval] - 1 >
+          INT_MAX) {
+        losses[destination].intervals[first_interval] = 1;
+      }
+      losses[destination].last_packet = ntohl(*numbers);
+      losses[destination].first_interval = (first_interval + 1) & 7;
+      first_interval = losses[destination].first_interval;
+      if (losses[destination].intervals[first_interval] > 0) {
+        double previous_loss_interval = 
+          losses[destination].average_loss_interval;
+        // Calculate the new average loss interval 
+        losses[destination].average_loss_interval = (double)
+          (losses[destination].intervals[first_interval] +
+          losses[destination].intervals[(first_interval + 1) & 7] * 2 +
+          losses[destination].intervals[(first_interval + 2) & 7] * 3 +
+          losses[destination].intervals[(first_interval + 3) & 7] * 4 +
+          losses[destination].intervals[(first_interval + 4) & 7] * 5 +
+          losses[destination].intervals[(first_interval + 5) & 7] * 5 +
+          losses[destination].intervals[(first_interval + 6) & 7] * 5 +
+          losses[destination].intervals[(first_interval + 7) & 7] * 5) /
+          (1 + 2 + 3 + 4 + 5 + 5 + 5 + 5);
+        DEBUG("Intervals: %d, %d, %d, %d, %d, %d, %d, %d\n",
+          losses[destination].intervals[first_interval],
+          losses[destination].intervals[(first_interval + 1) & 7],
+          losses[destination].intervals[(first_interval + 2) & 7],
+          losses[destination].intervals[(first_interval + 3) & 7],
+          losses[destination].intervals[(first_interval + 4) & 7],
+          losses[destination].intervals[(first_interval + 5) & 7],
+          losses[destination].intervals[(first_interval + 6) & 7],
+          losses[destination].intervals[(first_interval + 7) & 7]);
+        losses[destination].loss_event_rate =
+          1. / max(losses[destination].average_loss_interval,
+          previous_loss_interval);
+        DEBUG("loss_event_rate for %d: %f\n", destination, max_loss_event_rate);
+        
+        if (destination_with_max_loss_event_rate == (unsigned)destination &&
+            max_loss_event_rate > losses[destination].loss_event_rate) {
+          max_loss_event_rate = losses[0].loss_event_rate;
+          destination_with_max_loss_event_rate = 0;
+          for (unsigned i = 1; i < LossInformation::LOSS_INTERVALS_ACCOUNTED;
+              ++i) {
+            if (max_loss_event_rate < losses[i].loss_event_rate) {
+              max_loss_event_rate = losses[i].loss_event_rate;
+              destination_with_max_loss_event_rate = i;
+            }
+          }
+        } else if (max_loss_event_rate < losses[destination].loss_event_rate) {
+          max_loss_event_rate = losses[destination].loss_event_rate;
+          destination_with_max_loss_event_rate = destination;
+        }
+      }
+    //}
+#endif
       for (; i <= ntohl(*numbers); ++i) {
 #ifndef NDEBUG
         uint32_t dest_addr = htonl(target_addresses[destination]);
@@ -470,18 +588,102 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
         DEBUG("Packet %d has not been delivered to %s\n", i,
           inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
 #endif
+#ifdef USE_EQUATION_BASED_CONGESTION_CONTROL
+        if (i < number) {
+          ++n_errors;
+        }
+#endif
         missed_packets.insert(i);
       }
       ++numbers;
     }
+#ifdef USE_EQUATION_BASED_CONGESTION_CONTROL
+    DEBUG("n_errors: %d, last_packet: %d(%d)\n", n_errors,
+      number - losses[destination].last_packet,
+      losses[destination].last_packet);
+
+    if (number >= losses[destination].last_packet) {
+      double rate = (double)n_errors /
+        (number - losses[destination].last_packet + 2 +
+        losses[destination].n_errors_previous);
+      assert(rate < 1);
+      adjust_loss_rate(destination, rate,
+        number - losses[destination].last_packet);
+      losses[destination].last_packet = number;
+      losses[destination].n_errors_previous = n_errors;
+      assert(losses[destination].loss_event_rate > 0.0);
+    } else {
+      DEBUG("Negative interval received: %u - %u\n", number,
+        losses[destination].last_packet);
+#if 0
+      // FIXME: This is wrong evaluation
+      double rate = (double)n_errors / losses[destination].n_errors_previous;
+      assert(rate <= 1);
+      DEBUG("rate: %f, interval: %d\n", rate,
+        losses[destination].n_errors_previous);
+      adjust_loss_rate(destination, rate,
+        losses[destination].n_errors_previous);
+#endif
+    }
+    DEBUG("loss_event_rate for %d: %.9f\n", destination,
+      losses[destination].loss_event_rate);
+#endif
+
+#if USE_EQUATION_BASED_CONGESTION_CONTROL
+    register double p = max_loss_event_rate;
+    if (p > 0) {
+      ssthresh = 0;
+      DEBUG("max_loss_event_rate: %f(%u)\n", max_loss_event_rate,
+        destination_with_max_loss_event_rate);
+#if 0
+      if (destination == destination_with_max_loss_event_rate) {
+#endif
+        //unsigned old_window_size = window_size;
+        window_size = (double) MAX_UDP_PACKET_SIZE /
+          (sqrt(2. * p / 3.) + 12. * sqrt(3. * p / 8.) * (p + 32. * p * p * p));
+        //window_size = max(window_size, 2 * (unsigned)MAX_UDP_PACKET_SIZE);
+        //data_on_flow = (data_on_flow * window_size) / old_window_size;
+        DEBUG("Adjust the window(%u: %u) using the equation based algorithm\n",
+          window_size, data_on_flow);
+#if 0
+      }
+#endif
+    } else {
+#endif
+      SDEBUG("Adjust the window using TCP's algorithm\n");
+      // Information about loss intervals has not been correctly
+      // calculated yet
+      // Change window size if there were no messages about missed packets
+      // recently (during RTT)
+  	  // FIXME: Check whether this algorithm is appropriate
+#if 0
+      if ((unsigned)destination == destination_with_max_loss_event_rate) {
+        if (number - last_packet_caused_congestion < UINT32_MAX -
+            MAX_EXPECTED_WINDOW_SIZE) {
+#endif
+          ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
+          window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
+#ifdef DETAILED_MULTICAST_DEBUG
+          DEBUG("New window size: %u\n", window_size);
+#endif
+#if 0
+          last_packet_caused_congestion = 
+            ((MulticastMessageHeader *)buffer[store_position - 1]->message)->get_number() +
+            (ssthresh / UDP_MAX_LENGTH);
+        }
+      }
+#endif
+#if USE_EQUATION_BASED_CONGESTION_CONTROL
+    }
+#endif
+
+    pthread_mutex_unlock(&mutex);
   }
   is_some_destinations_replied = true;
-  pthread_mutex_unlock(&mutex);
 }
 
 // Compose the session termination message and return it to the caller
-void *MulticastSendQueue::prepare_termination(size_t *size,
-    uint32_t session_id)
+void *MulticastSendQueue::prepare_termination(uint32_t session_id)
 {
   if (termination_message != NULL) {
     delete termination_message;
@@ -496,7 +698,6 @@ void *MulticastSendQueue::prepare_termination(size_t *size,
   for (unsigned i = 0; i < n_destinations; ++i) {
     *p++ = htonl(target_addresses[i]);
   }
-  *size = termination_message_size;
   return termination_message;
 }
 

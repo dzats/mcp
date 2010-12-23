@@ -76,11 +76,11 @@ int MulticastRecvQueue::put_message(const void *message, size_t length,
     bool do_wake_reader = n_messages == 0 && number == last_num + 1;
     // Check space in the buffer
     if (cyclic_less_or_equal(first_num + buffer.size(), number)) {
-      // Enlarge the buffer, FIXME: some limit check required here (may be)
+      // Enlarge the buffer,
       unsigned element = first_num + buffer.size() - 1;
-      if ((unsigned)buffer.size() + number - element >=
-          (unsigned)MAX_QUEUE_SIZE) {
-        SDEBUG("Maximum buffer size reached\n");
+      if (number - first_num >= (unsigned)MAX_QUEUE_SIZE) {
+        DEBUG("Maximum buffer size reached (%u, %u)\n", n_messages,
+          number - first_num);
         pthread_mutex_unlock(&mutex);
         return -1;
       }

@@ -271,32 +271,13 @@ public:
     message_type = htonl(m);
     session_id = htonl(s);
   }
-  uint32_t get_message_type()
-  {
-    return ntohl(message_type);
-  }
-  uint32_t get_session_id()
-  {
-    return ntohl(session_id);
-  }
+  uint32_t get_message_type() const { return ntohl(message_type); }
+  uint32_t get_session_id() const { return ntohl(session_id); }
+  uint32_t get_number() const { return ntohl(number); }
+  uint32_t get_responder() const { return ntohl(responder); }
 
-  void set_number(uint32_t n)
-  {
-    number = htonl(n);
-  }
-  uint32_t get_number()
-  {
-    return ntohl(number);
-  }
-
-  void set_responder(uint32_t id)
-  {
-    responder = htonl(id);
-  }
-  uint32_t get_responder()
-  {
-    return ntohl(responder);
-  }
+  void set_number(uint32_t n) { number = htonl(n); }
+  void set_responder(uint32_t id) { responder = htonl(id); }
 } __attribute__((packed));
 
 /*

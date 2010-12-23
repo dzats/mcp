@@ -68,6 +68,11 @@ class MulticastReceiver
   // Returns zero on success and error code otherwise.
   int send_missed_packets(uint32_t message_number);
 
+  // Send appropriate reply to the MULTICAST_TERMINATION_REQUEST or
+  // MULTICAST_ABNORMAL_TERMINATION_REQUEST messages
+  void reply_to_a_termination_request(const MulticastMessageHeader *mmh,
+    int len, uint8_t * const buffer);
+
   // This method implements something like the TCP's TIME_WAIT state. It waits
   // for possible retransmissions of the MULTICAST_TERMINATION_REQUEST message.
   void time_wait(uint8_t * const buffer);

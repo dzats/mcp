@@ -52,8 +52,11 @@ private:
   static const unsigned DEFAULT_ROUND_TRIP_TIME = 40000; // (in milliseconds)
   static const unsigned MAX_ERROR_QUEUE_SIZE_MULTIPLICATOR = 4; // Max size
     // of the error queue / number of targets
-  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 16; // Max number
+  static const unsigned MAX_NUMBER_OF_TERMINATION_RETRANS = 32; // Max number
     // of the multicast session termination retry messages to be send
+  static const unsigned MAX_RETRANSMISSION_TIMEOUT = 4; // (in seconds)
+    // Maximum timeout between two successive retransmissions of the
+    // MULTICAST_TERMINATION_REQUEST message
   static const unsigned MAX_PORT_CHOOSING_TRIES = 10;
 
   Mode mode; // Whether the UnicastSender object is used by the client (mcp)

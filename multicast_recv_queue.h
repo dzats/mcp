@@ -15,7 +15,7 @@ class MulticastRecvQueue
     MessageRecord() {}
   };
   static const int DEFAULT_BUFFER_SIZE = 100;
-  static const int MAX_QUEUE_SIZE = 6000; // Maximum number of messages in
+  static const int MAX_QUEUE_SIZE = 10000; // Maximum number of messages in
     // the queue
   std::deque<MessageRecord*> buffer; // dequeue of the message number to
   MessageRecord *swapper;

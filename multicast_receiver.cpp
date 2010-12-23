@@ -122,6 +122,45 @@ int MulticastReceiver::send_missed_packets(uint32_t message_number)
   return send_datagram(message, (uint8_t *)store_positon - message);
 }
 
+// Send appropriate reply to the MULTICAST_TERMINATION_REQUEST or
+// MULTICAST_ABNORMAL_TERMINATION_REQUEST messages
+void MulticastReceiver::reply_to_a_termination_request(
+    const MulticastMessageHeader *mmh, int len, uint8_t * const buffer)
+{
+  // Search whether the local address contained in this message
+  uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
+  uint32_t *hosts_end = (uint32_t *)((uint8_t *)mmh + len); 
+  uint32_t *i = find(hosts_begin, hosts_end,
+    htonl(local_address));
+  if (i != hosts_end) {
+    DEBUG("Termination message destinated to this host (%zu)\n",
+      missed_packets.size());
+    // The host is supposed to reply to this message
+    if (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
+      if (missed_packets.size() > 0) {
+        // FIXME: ACK flooding is possible here
+        int result = send_missed_packets(mmh->get_number());
+        if (result != 0) {
+          ERROR("Can't send information about missed packets: %s\n",
+            strerror(result));
+          message_queue.set_fatal_error();
+          pthread_exit(NULL);
+        }
+      }
+    } else {
+      SDEBUG("Multicast abnormal termination request received\n");
+      message_queue.set_fatal_error();
+      int send_reply_result = send_reply(mmh->get_number());
+      if (send_reply_result != 0) {
+        ERROR("Can't send a UDP reply: %s\n",
+          strerror(send_reply_result));
+        pthread_exit(NULL);
+      }
+      time_wait(buffer);
+    }
+  }
+}
+
 // Send a reply back to the source
 // Returns zero on success and error code otherwise
 int MulticastReceiver::send_reply(uint32_t number)
@@ -408,9 +447,10 @@ void MulticastReceiver::read_messages()
       }
 
       // Store the message to be processed (may be later)
-      if (message_queue.put_message(buffer, len, message_number) != 0) {
-        DEBUG("Discard the message %d (queue is full)\n", message_number);
-        continue;
+      int put_message_result = message_queue.put_message(buffer, len,
+        message_number);
+      if (put_message_result != 0) {
+        missed_packets.insert(message_number);
       }
 
       if (next_message_expected != message_number) {
@@ -421,7 +461,7 @@ void MulticastReceiver::read_messages()
         if (cyclic_less(message_number, next_message_expected)) {
           // A retransmission received
           set<uint32_t>::iterator i = missed_packets.find(message_number);
-          if (i != missed_packets.end()) {
+          if (i != missed_packets.end() && put_message_result == 0) {
             missed_packets.erase(i);
           }
           DEBUG("Retransmission for %u(%zu) received\n", message_number,
@@ -452,44 +492,13 @@ void MulticastReceiver::read_messages()
 
       switch (mmh->get_message_type()) {
         case MULTICAST_TERMINATION_REQUEST:
-        case MULTICAST_ABNORMAL_TERMINATION_REQUEST: {
-            // Search whether the local address contained in this message
-            uint32_t *hosts_begin = (uint32_t *)(mmh + 1);
-            uint32_t *hosts_end = (uint32_t *)(buffer + len); 
-            uint32_t *i = find(hosts_begin, hosts_end,
-              htonl(local_address));
-            if (i != hosts_end) {
-              // The host is supposed to reply to this message
-              if (mmh->get_message_type() == MULTICAST_TERMINATION_REQUEST) {
-                if (!is_termination_request_received) {
-                  SDEBUG("Termination request received\n");
-                  is_termination_request_received = true;
-                  termination_request_number = mmh->get_number();
-                }
-                if (missed_packets.size() > 0 &&
-                    cyclic_less(*missed_packets.begin(), message_number)) {
-                  // FIXME: ACK flooding is possible here
-                  int result = send_missed_packets(message_number);
-                  if (result != 0) {
-                    ERROR("Can't send information about missed packets: %s\n",
-                      strerror(result));
-                    message_queue.set_fatal_error();
-                    pthread_exit(NULL);
-                  }
-                }
-              } else {
-                SDEBUG("Multicast abnormal termination request received\n");
-                message_queue.set_fatal_error();
-                int send_reply_result = send_reply(message_number);
-                if (send_reply_result != 0) {
-                  ERROR("Can't send a UDP reply: %s\n",
-                    strerror(send_reply_result));
-                  pthread_exit(NULL);
-                }
-                time_wait(buffer);
-              }
-            }
+        case MULTICAST_ABNORMAL_TERMINATION_REQUEST:
+          if (!is_termination_request_received && put_message_result == 0) {
+            SDEBUG("Termination request received\n");
+            is_termination_request_received = true;
           }
+          termination_request_number = mmh->get_number();
+          reply_to_a_termination_request(mmh, len, buffer);
           break;
         default:
 #ifdef DETAILED_MULTICAST_DEBUG

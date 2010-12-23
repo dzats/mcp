@@ -302,7 +302,7 @@ void MulticastSender::mcast_send(const void *message, int size)
   }
   // TODO: add some percentage of unacknowledged packets depending
   // on the window size
-  next_responder = (next_responder + 1) % targets.size();
+  next_responder = (next_responder + 1) % (targets.size() * 2);
 
   // Store message for the possibility of the future retransmissions.
   // (can block)
@@ -763,9 +763,8 @@ int MulticastSender::session()
       }
       if (op->fileinfo.is_trailing_record()) {
         // Send the MULTICAST_TERMINATION_REQUEST message
-        size_t size;
-        void *message = send_queue->prepare_termination(&size, session_id);
-        mcast_send(message, size);
+        void *message = send_queue->prepare_termination(session_id);
+        mcast_send(message, send_queue->get_termination_message_size());
 
         unsigned retrans_number = 1;
         struct timeval current_time;
@@ -773,15 +772,15 @@ int MulticastSender::session()
         struct timespec next_retrans_time;
         TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
         unsigned max_rtt = send_queue->get_max_round_trip_time();
-        struct timespec retrans_timeout = {0, 0};
+        struct timespec retrans_timeout;
         if (max_rtt > 0) {
-          retrans_timeout.tv_nsec += (max_rtt << 1) * 1000;
+          retrans_timeout.tv_sec = (max_rtt / 500000) * 2;
+          retrans_timeout.tv_nsec = ((max_rtt % 500000) * 2) * 1000;
         } else {
-          retrans_timeout.tv_nsec += DEFAULT_TERMINATE_RETRANSMISSION_RATE;
-        }
-        if (retrans_timeout.tv_nsec >= 1000000000) {
-          retrans_timeout.tv_nsec = retrans_timeout.tv_nsec % 1000000000;
-          retrans_timeout.tv_sec += 1;
+          retrans_timeout.tv_sec =
+            DEFAULT_TERMINATE_RETRANSMISSION_RATE / 1000000000;
+          retrans_timeout.tv_nsec =
+            DEFAULT_TERMINATE_RETRANSMISSION_RATE % 1000000000;
         }
         next_retrans_time.tv_sec += retrans_timeout.tv_sec;
         next_retrans_time.tv_nsec += retrans_timeout.tv_nsec;
@@ -814,18 +813,22 @@ int MulticastSender::session()
           }
 
           // Retransmit the session termination request
-          udp_send(message, size, 0);
+          udp_send(message, send_queue->get_termination_message_size(), 0);
 
           gettimeofday(&current_time, NULL);
           DEBUG("Retranssion %u of the MULTICAST_TERMINATION_REQUEST: %u, %u\n",
             retrans_number, (unsigned)current_time.tv_sec,
             (unsigned)current_time.tv_usec);
           TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-          retrans_timeout.tv_sec += (retrans_timeout.tv_sec >> 1);
-          retrans_timeout.tv_nsec += (retrans_timeout.tv_nsec >> 1);
-          if (retrans_timeout.tv_nsec >= 1000000000) {
-            retrans_timeout.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
-            retrans_timeout.tv_sec += 1;
+          if (wait_result < 0 &&
+              (unsigned)retrans_timeout.tv_sec < MAX_RETRANSMISSION_TIMEOUT) {
+            // Increase the retransmission timeout if there were no reply
+            retrans_timeout.tv_sec += (retrans_timeout.tv_sec >> 1);
+            retrans_timeout.tv_nsec += (retrans_timeout.tv_nsec >> 1);
+            if (retrans_timeout.tv_nsec >= 1000000000) {
+              retrans_timeout.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
+              retrans_timeout.tv_sec += 1;
+            }
           }
           next_retrans_time.tv_sec += retrans_timeout.tv_sec;
           next_retrans_time.tv_nsec += retrans_timeout.tv_nsec;
