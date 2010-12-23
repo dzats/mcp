@@ -1,56 +1,175 @@
 #ifndef DISTRIBUTOR_H_HEADER
 #define DISTRIBUTOR_H_HEADER 1
 #include <assert.h>
+
 #include <algorithm>
 #include <string>
+#include <list>
 
 #include "connection.h"
 #include "md5.h"
 
 // An object that deliver tasks (copy of file or directory) from one reader
 // to up to three personalized writers
-class Distributor {
+class Distributor
+{
 public:
 	// Structure describing a task for the distributor
-	struct TaskHeader {
+	struct TaskHeader
+	{
+	private:
+		char *filename;
+
+		// Prohibit coping for this object
+		TaskHeader(const TaskHeader& t);
+	public:
 		FileInfoHeader fileinfo;
-		std::string filename; // carefully check this
+
+		TaskHeader() : filename(NULL) {}
+		~TaskHeader() {
+			if (filename != NULL) {
+				free(filename);
+			}
+		}
+
+		void set_filename(const char *fname) {
+			if (filename != NULL) {
+				free(filename);
+			}
+			filename = strdup(fname);
+		}
+
+		char *get_filename() {
+			return filename;
+		}
 	};
 	
 	// Structure describing status of the reader or a writer
-	struct Client {
+	struct Client
+	{
 		bool is_present; // flag indicating whether the object is active
 		bool is_done; // flag indicating whether the current task is done by
 			// this object
 		uint8_t status; // status of the last task, see connection.h
 		unsigned offset; // data offet in the distributor's buffer
 
-		// Fields used to store errors
-		uint32_t addr; // Address ot the host, caused the error.
-			// INADDR_NONE means that the error occured on this host
-		char *message; // network message to be sent to the immediate
-			// source in the case of unrecoverable error 
-		uint32_t message_length;
-
-		void set_error(int address, char *msg, uint32_t msg_length) volatile {
-			if (message != NULL) {
-				free(message);
-			}
-			addr = address;
-			message = msg;
-			message_length = msg_length;
-		}
-
-		Client() : is_present(false), is_done(true), status(STATUS_OK),
-			offset(0), message(NULL) {}
-		~Client() {
-			if (message != NULL) {
-				free(message);
-			}
-		}
+		Client() : is_present(false), is_done(true), status(STATUS_OK), offset(0) {}
 	};
 
-	class Writer;
+	class Errors;
+
+	class ErrorMessage
+	{
+		ErrorMessage(const ErrorMessage&); // Protect from coping
+	protected:
+		uint8_t status; // status of the last task, see connection.h
+	public:
+		ErrorMessage(uint8_t s) : status(s) {}
+		virtual ~ErrorMessage() {}
+	
+		virtual void display() const = 0;
+		virtual void send(int sock) = 0;
+
+		friend class Errors;
+	};
+	
+	class SimpleError : public ErrorMessage
+	{
+		uint32_t address; // Address ot the host, caused the error.
+			// INADDR_NONE means that the error occured on this host
+		uint32_t message_length;
+		uint8_t *message; // network message to be sent to the immediate
+
+		SimpleError(const ErrorMessage&); // Protect from coping
+	public:
+		SimpleError(uint8_t status, uint32_t address, char *message,
+				uint32_t message_length) : ErrorMessage(status)
+		{
+			this->address = address;
+			this->message_length = message_length;
+			this->message = (uint8_t *)strdup(message);
+		}
+		~SimpleError()
+		{
+			free(message);
+		}
+		void display() const;
+		void send(int sock);
+	};
+
+	class FileRetransRequest : public ErrorMessage
+	{
+		char *filename;
+		FileInfoHeader file_info_header;
+		uint32_t address;
+		std::vector<Destination> destinations;
+	public:
+		FileRetransRequest(const char *fname, const FileInfoHeader& finfo,
+				uint32_t addr, const std::vector<Destination>& dst) :
+				ErrorMessage(STATUS_INCORRECT_CHECKSUM), file_info_header(finfo),
+				address(addr), destinations(dst)
+		{
+			size_t filename_length = file_info_header.get_name_length();
+			filename = (char *)malloc(filename_length + 1);
+			filename[filename_length] = '\0';
+			memcpy(filename, fname, filename_length);
+		}
+		FileRetransRequest(uint32_t addr, const void *message,
+			size_t message_length);
+		~FileRetransRequest()
+		{
+			free(filename);
+		}
+
+		void display() const;
+		void send(int sock);
+
+		friend class Errors;
+	};
+
+	class Errors
+	{
+		pthread_mutex_t mutex;
+		std::list<ErrorMessage*> errors;
+	public:
+		Errors()
+		{
+			pthread_mutex_init(&mutex, NULL);
+		}
+		~Errors()
+		{
+			while (errors.size() > 0) {
+				delete errors.front();
+				errors.pop_front();
+			}
+			pthread_mutex_destroy(&mutex);
+		}
+
+		void add(ErrorMessage *error_message)
+		{
+			pthread_mutex_lock(&mutex);
+			errors.push_back(error_message);
+			pthread_mutex_unlock(&mutex);
+		}
+
+		// Displays the registered errors 
+		void display();
+
+		// Returns true if some of the errors is unrecoverable (even if it is not
+		// fatal) and false otherwise
+		bool is_unrecoverable_error_occurred();
+
+		// Sends the occurred error to the imediate unicast source
+		void send(int sock);
+
+		// Get the files that should be retransmitted. dest is a value/result
+		// argument.
+		char** get_retransmissions(std::vector<Destination> *dest,
+			int **filename_offsets);
+	};
+
+	Errors errors;
+
 private:
 	TaskHeader operation;
 	uint8_t *buffer;
@@ -77,27 +196,10 @@ protected:
 	pthread_cond_t operation_ready_cond; // New operation is ready
 	pthread_cond_t writers_finished_cond; // The current operation is finished
 		// by the all the writers
-	pthread_cond_t filewriter_done_cond; // The file_writer has finished the
-		// operation
 
 	// protect from copying
 	Distributor(const Distributor&);
 	Distributor& operator=(const Distributor&);
-
-	// This is experimental routine used for file retransmissions in the
-	// case of data corruption
-	void wait_for_filewriter() {
-		pthread_mutex_lock(&_mutex);
-		reader.is_done = true;
-	
-		// Wake up the writers
-		pthread_cond_broadcast(&data_ready_cond);
-	
-		if (file_writer.is_present && !file_writer.is_done) {
-			pthread_cond_wait(&filewriter_done_cond, &_mutex);
-		}
-		pthread_mutex_unlock(&_mutex);
-	}
 
 	/*
 		Internal funcion that return space available for write
@@ -111,13 +213,15 @@ protected:
 	*/
 	inline int _get_data(int offset);
 
-	bool all_writers_done() {
+	bool all_writers_done()
+	{
 		return (!file_writer.is_present || file_writer.is_done) &&
 			(!unicast_sender.is_present || unicast_sender.is_done) &&
 			(!multicast_sender.is_present || multicast_sender.is_done);
 	}
 
-	bool all_done() {
+	bool all_done()
+	{
 		return reader.is_done && all_writers_done();
 	}
 
@@ -141,7 +245,8 @@ protected:
 	*/
 	void update_reader_position(int count);
 
-	void *rposition() {
+	void *rposition()
+	{
 		return buffer + (reader.offset & DEFAULT_BUFFER_MASK);
 	}
 
@@ -149,12 +254,13 @@ protected:
 	// Count should not be greater than zero.
 	void update_writer_position(int count, Client *w);
 
-	void *wposition(Client *w) {
+	void *wposition(Client *w)
+	{
 		return buffer + (w->offset & DEFAULT_BUFFER_MASK);
 	}
 
 	// Adds a new task to the buffer, block until the previous task finished
-	void add_task(const TaskHeader& op);
+	void add_task(const FileInfoHeader& fileinfo, const char* filename);
 
 	// Restart the same task (for retransmission)
 	void restart_task();
@@ -175,9 +281,9 @@ protected:
 public:
 	Distributor();
 
-	~Distributor() {
+	~Distributor()
+	{
 		free(buffer);
-		pthread_cond_destroy(&filewriter_done_cond);
 		pthread_cond_destroy(&writers_finished_cond);
 		pthread_cond_destroy(&operation_ready_cond);
 		pthread_cond_destroy(&data_ready_cond);
@@ -185,78 +291,33 @@ public:
 		pthread_mutex_destroy(&_mutex);
 	}
 
-	// Displays the fatal error registered by the writers (unicast sender
-	// and multicast sender or by the reader
-	void display_error();
-
 	// Sends the occurred error to the imediate source
-	void send_fatal_error(int sock);
-};
-
-// The Writer class describing work of an abstract writer with the buffer
-class Distributor::Writer {
-protected:
-	Distributor *buff;
-	Distributor::Client *w;
-
-	Writer(Distributor *b, Distributor::Client *worker) : buff(b),
-			w(worker) {
-		assert(!w->is_present);
-		w->is_present = true;
-	}
-	~Writer() {
-		pthread_mutex_lock(&buff->_mutex);
-		w->is_present = false;
-		pthread_cond_signal(&buff->space_ready_cond);
-		if (buff->all_writers_done()) {
-			pthread_cond_signal(&buff->writers_finished_cond);
-		}
-		pthread_mutex_unlock(&buff->_mutex);
+	void send_errors(int sock)
+	{
+		errors.send(sock);
 	}
 
-	Distributor::TaskHeader* get_task() {
-		pthread_mutex_lock(&buff->_mutex);
-		while (w->is_done) {
-			// Wait for the new task become available
-			pthread_cond_wait(&buff->operation_ready_cond, &buff->_mutex);
-		}
-		pthread_mutex_unlock(&buff->_mutex);
-		return &buff->operation;
+	// Displays the registered errors 
+	void display_errors()
+	{
+		errors.display();
 	}
 
-	void submit_task() {
-		pthread_mutex_lock(&buff->_mutex);
-		w->is_done = true;
-		if (w->status != STATUS_OK) {
-			pthread_cond_signal(&buff->space_ready_cond);
-		}
-		if (w == &buff->file_writer) {
-			pthread_cond_signal(&buff->filewriter_done_cond);
-		}
-		if (buff->all_writers_done()) {
-			pthread_cond_signal(&buff->writers_finished_cond);
-		}
-		pthread_mutex_unlock(&buff->_mutex);
+	// Wrapper for the Errors.is_unrecoverable_error_occurred
+	bool is_unrecoverable_error_occurred()
+	{
+		return errors.is_unrecoverable_error_occurred();
 	}
 
-	int get_data() { return buff->get_data(w); }
-	void update_position(int count) {
-		return buff->update_writer_position(count, w);
-	}
-	void *pointer() { return buff->wposition(w); }
-	// Checksum of the last file received
-	MD5sum* checksum() { return &buff->checksum; }
-
-	// Writes data from the distributor to fd. Returns 0 on success or
-	// errno of the last write call on failure
-	int write_to_file(int fd);
+	friend class Writer;
 };
 
 /*
 	Internal funcion that return space available for read
 	_mutex should be locked.
 */
-inline int Distributor::_get_data(int offset) {
+inline int Distributor::_get_data(int offset)
+{
 	register unsigned count = DEFAULT_BUFFER_SIZE - offset;
 	if (count > 0) {
 		count = std::min(count, reader.offset - offset);
@@ -270,7 +331,8 @@ inline int Distributor::_get_data(int offset) {
 	Internal funcion that return space available for write
 	_mutex should be locked.
 */
-inline int Distributor::_get_space() {
+inline int Distributor::_get_space()
+{
 	register int reader_offset = reader.offset;
 	unsigned count = DEFAULT_BUFFER_SIZE - (reader_offset & DEFAULT_BUFFER_MASK);
 	if (file_writer.is_present && !file_writer.is_done) {

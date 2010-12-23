@@ -10,20 +10,24 @@
 #include "path.h"
 
 // class that reads sources from disk or from the unicast network connection
-class UnicastReceiver : public Reader {
+class UnicastReceiver : public Reader
+{
 	int sock;
 
 	// Prohibit coping for objects of this class
 	UnicastReceiver(const UnicastReceiver&);
 	UnicastReceiver& operator=(const UnicastReceiver&);
 public:
-	std::vector<Destination> dst;
+	std::vector<Destination> destinations;
+	uint32_t flags;
 	int nsources;
 	char *path;
+	uint32_t local_address;
 	PathType path_type;
 
 	UnicastReceiver() : sock(-1), path(NULL) {}
-	~UnicastReceiver() {
+	~UnicastReceiver()
+	{
 		if (path != NULL) {
 			free(path);
 		}
@@ -45,10 +49,7 @@ private:
 	// Gets the destinations from the immediate source
 	void get_destinations(MD5sum *checksum);
 
-	// Reads data from 'fd' and pass it to the distributor
-	int read_from_file(int fd);
-
-	// Reads file from the socket 'fd' and pass it to the distributor
-	void read_from_socket(const char *filename);
+	// reads file from the socket 'fd' and pass it to the distributor
+	void read_from_socket(const char *filename, uint64_t size);
 };
 #endif

@@ -31,7 +31,10 @@ using namespace std;
 #include "multicast_sender.h"
 #include "log.h"
 
-void usage_and_exit(char *name) {
+#define MAX_RETRANSMISSIONS 3
+
+void usage_and_exit(char *name)
+{
 	printf("Usage:\n");
 	printf("%s [options] file server1[:location1] [...]\n", name);
 	printf("%s [options] file1 [...] \\; server1[:location1] [...]\n", name);
@@ -39,13 +42,19 @@ void usage_and_exit(char *name) {
 	"\t-p port\n"
 	"\t\tSpecify a TCP port for the unicast connections.\n"
 	"\t\tThe default port is 6879.\n\n" 
+	"\t-U\tUnicast only (for all hops)\n"
+	"\t-u\tUnicast only (for the first hop)\n"
+	"\t-m\tMulticast only\n"
+	"\t-c\tVerify the file checksums twise. The second verification is\n"
+	"\t\tperformed on data read from the disk.\n"
 	"\t-o\tPreserve the specified servers order during pipelined transfert.\n\n");
 	exit(EXIT_FAILURE);
 }
 
 // Wrapper for the UnicastSender::session function, passed
 // to pthread_create.
-void *unicast_sender_routine(void *args) {
+void *unicast_sender_routine(void *args)
+{
 	SDEBUG("Start the unicast sender\n");
 	UnicastSender *us = (UnicastSender *)args;
 	if (us->session() != 0) {
@@ -57,7 +66,8 @@ void *unicast_sender_routine(void *args) {
 
 // Wrapper for the MulticastSender::session function, passed
 // to pthread_create.
-void *multicast_sender_routine(void *args) {
+void *multicast_sender_routine(void *args)
+{
 	SDEBUG("Start the multicast sender\n");
 	MulticastSender *ms = (MulticastSender *)args;
 	if (ms->session() != 0) {
@@ -68,7 +78,8 @@ void *multicast_sender_routine(void *args) {
 }
 
 #ifndef NDEBUG
-void sigpipe_handler(int signum) {
+void sigpipe_handler(int signum)
+{
 	DEBUG("sigpipe_handler: signal %d received\n", signum);
 }
 #endif
@@ -80,7 +91,8 @@ void sigpipe_handler(int signum) {
 	the result (if not NULL), this memory should be further deallocated
 	using free(3).
 */
-static char *prepare_to_basename(char *path) {
+static char *prepare_to_basename(char *path)
+{
 	assert(path != NULL);
 
 	int dot_count = 0; // Number of dottes encountered
@@ -168,13 +180,28 @@ static char *prepare_to_basename(char *path) {
 	}
 }
 
-int main(int argc, char **argv) {
-	// Options
+int main(int argc, char **argv)
+{
 	char *prog_name = argv[0];
+	bool is_unrecoverable_error_occurred = false; // whether some unrecoverable
+		// errors occurred
+	
+	// Configurable variables
 	bool preserve_order = false; // Don't change order of the destinations
-	// TODO: realize behavior defined by the following flag
-	bool overwrite_files = true; // Overwrite read-only files
+	// TODO: implement behavior defined by the following flag
+	//bool overwrite_files = true; // Overwrite read-only files
+	bool is_multicast_only = false; // Use only the link-local multicast traffic
+	bool is_first_hop_unicast_only = false; // Use only the unicast traffic
+		// for the first hop
+	bool verify_checksums_twise = false; // Verify the file checksums twise
 	uint16_t unicast_port = UNICAST_PORT; // TCP port used for unicast connections
+	uint32_t flags = 0;
+#ifdef NDEBUG // Multicast is temporary switched off
+	bool is_unicast_only = true; // Use only the unicast traffic
+	flags |= UNICAST_ONLY_FLAG;
+#else
+	bool is_unicast_only = false; // Use only the unicast traffic
+#endif
 
 	// Set speed for the pseudo-random numbers
 	struct timeval tv;
@@ -183,7 +210,7 @@ int main(int argc, char **argv) {
 
 	// Parse the command options
 	int ch;
-	while ((ch = getopt(argc, argv, "p:oh")) != -1) {
+	while ((ch = getopt(argc, argv, "p:omUuch")) != -1) {
 		switch (ch) {
 			case 'p': // Port specified
 				if ((unicast_port = atoi(optarg)) == 0) {
@@ -194,10 +221,24 @@ int main(int argc, char **argv) {
 			case 'o': // Preserve order during pipe transfert (don't
 				// sort destinations)
 				preserve_order = true;
+				flags |= PRESERVE_ORDER_FLAG;
 				break;
-			case 'n': // Don't overwrite files, if they are already exist
-				// TODO: implement this functionality
-				overwrite_files = false;
+			case 'm': // Use only the link-local multicast traffic
+				is_multicast_only = true;
+				is_unicast_only = false;
+				flags &= ~UNICAST_ONLY_FLAG;
+				break;
+			case 'U': // Use only the unicast traffic
+				is_unicast_only = true;
+				is_multicast_only = false;
+				flags |= UNICAST_ONLY_FLAG;
+				break;
+			case 'u': // Use only the unicast traffic for the first hop
+				is_first_hop_unicast_only = true;
+				break;
+			case 'c': // Verify the file checksums twise
+				verify_checksums_twise = true;
+				flags |= VERIFY_CHECKSUMS_TWISE_FLAG;
 				break;
 			default:
 				usage_and_exit(prog_name);
@@ -227,8 +268,10 @@ int main(int argc, char **argv) {
 
 	// Get the sources' names from the arguments
 	char** filenames = (char **)malloc(sizeof(char **) * (nsources + 1)); // Null-terminating array of sources
+	int *filename_offsets = (int *)malloc(sizeof(int) * nsources);
 	for (int i = 0; i < nsources; ++i) {
 		filenames[i] = prepare_to_basename(argv[i]);
+		filename_offsets[i] = 0;
 		if (filenames[i] == NULL) {
 			ERROR("Incorrect path: %s\n", argv[i]);
 			exit(EXIT_FAILURE);
@@ -291,6 +334,26 @@ int main(int argc, char **argv) {
 	}
 
 #ifndef NDEBUG
+	// Set SIGPIPE handler for debugging
+	signal(SIGPIPE, sigpipe_handler);
+#else
+	signal(SIGPIPE, SIG_IGN);
+#endif
+
+	// Start of the global part, which is 
+	bool is_all_done = false;
+	unsigned n_retransmissions = 0;
+	do {
+		// The main objects
+		FileReader *source_reader = new FileReader();
+		UnicastSender *unicast_sender = NULL;
+		MulticastSender *multicast_sender = NULL;
+		pthread_t unicast_sender_thread;
+		pthread_t multicast_sender_thread;
+		bool is_unicast_sender_started = false;
+		bool is_multicast_sender_started = false;
+
+#ifndef NDEBUG
 	printf("Destinations:\n");
 	for (vector<Destination>::const_iterator i = dst.begin();
 			i != dst.end(); ++i) {
@@ -305,115 +368,185 @@ int main(int argc, char **argv) {
 		}
 	}
 #endif
-
+	
+		vector<Destination> *remaining_dst;
+		if (!is_unicast_only && !is_first_hop_unicast_only) {
+				// && (dst.size() > 2 || is_multicast_only))
+			multicast_sender = new MulticastSender(source_reader,
+				MulticastSender::client_mode, unicast_port, nsources,
+				n_retransmissions);
+			// Establish the multicast session
+			remaining_dst = multicast_sender->session_init(dst,
+			nsources);
+			if (remaining_dst == NULL) {
+				source_reader->display_errors();
+				exit(EXIT_FAILURE);
+			}
+			if (preserve_order) {
+				// FIXME: Do something here to implement the preserve order policy
+			}
 #ifndef NDEBUG
-	// Set SIGPIPE handler for debugging
-	signal(SIGPIPE, sigpipe_handler);
-#else
-	signal(SIGPIPE, SIG_IGN);
+			SDEBUG("Destinations unreachable through multicast:\n");
+			for (vector<Destination>::const_iterator i = remaining_dst->begin();
+					i != remaining_dst->end(); ++i) {
+				printf("%d.", i->addr >> 24);
+				printf("%d.", i->addr >> 16 & 0xFF);
+				printf("%d.", i->addr >> 8 & 0xFF);
+				printf("%d: ", i->addr & 0xFF);
+				if (i->filename != NULL) {
+					printf("%s\n", &*(i->filename));
+				} else {
+					printf("\n");
+				}
+			}
 #endif
-
-	// The main objects
-	FileReader *source_reader = new FileReader();
-	UnicastSender *unicast_sender = NULL;
-	MulticastSender *multicast_sender = new MulticastSender(source_reader,
-		unicast_port, nsources);
-	pthread_t unicast_sender_thread;
-	pthread_t multicast_sender_thread;
-	bool is_unicast_sender_started = false;
-	bool is_multicast_sender_started = false;
-
-	// Establish the multicast session
-	vector<Destination> *remaining_dst = multicast_sender->session_init(dst,
-		nsources);
-	if (remaining_dst == NULL) {
-		source_reader->display_error();
-		exit(EXIT_FAILURE);
-	}
-	if (preserve_order) {
-		// FIXME: Do something here to implement the preserve order policy
-	}
-#ifndef NDEBUG
-	SDEBUG("Destinations unreachable through multicast:\n");
-	for (vector<Destination>::const_iterator i = remaining_dst->begin();
-			i != remaining_dst->end(); ++i) {
-		printf("%d.", (*i).addr >> 24);
-		printf("%d.", (*i).addr >> 16 & 0xFF);
-		printf("%d.", (*i).addr >> 8 & 0xFF);
-		printf("%d: ", (*i).addr & 0xFF);
-		if (i->filename != NULL) {
-			printf("%s\n", &*(i->filename));
+			if (is_multicast_only && remaining_dst->size() != 0) {
+				char *hosts = (char *)strdup("");
+				for (vector<Destination>::const_iterator i = remaining_dst->begin();
+						i != remaining_dst->end();) {
+					uint32_t address = htonl(i->addr);
+					++i;
+					char addr[INET_ADDRSTRLEN + 2];
+					inet_ntop(AF_INET, &address, addr, sizeof(addr));
+					if (i != remaining_dst->end()) {
+						strcat(addr, ", ");
+					}
+					hosts = (char *)realloc(hosts, strlen(hosts) + strlen(addr) + 1);
+					strcat(hosts, addr);
+				}
+				ERROR("Can't establish multicast connection with the hosts: %s\n", hosts);
+				free(hosts);
+				exit(EXIT_FAILURE);
+			}
 		} else {
-			printf("\n");
+			remaining_dst = new vector<Destination>(dst);
 		}
-	}
-#endif
-	// FIXME: some other evaluation should done be here
-	if (remaining_dst->size() < dst.size()) {
-		// Start the multicast sender
-		int error;
-		if ((error = pthread_create(&multicast_sender_thread, NULL,
-				multicast_sender_routine, (void *)multicast_sender)) != 0) {
-			ERROR("Can't create a new thread: %s\n", strerror(errno));
-			exit(EXIT_FAILURE);
+	
+		// FIXME: some other evaluation should done be here
+		if (remaining_dst->size() < dst.size()) {
+			// Start the multicast sender
+			int error;
+			error = pthread_create(&multicast_sender_thread, NULL,
+				multicast_sender_routine, (void *)multicast_sender);
+			if (error != 0) {
+				ERROR("Can't create a new thread: %s\n", strerror(errno));
+				exit(EXIT_FAILURE);
+			}
+			is_multicast_sender_started = true;
+		} else {
+			// Delete the multicast sender
+			delete multicast_sender;
+			multicast_sender = NULL;
 		}
-		is_multicast_sender_started = true;
-	} else {
-		// Delete the multicast sender
-		delete multicast_sender;
-		multicast_sender = NULL;
-	}
+	
+		if (remaining_dst->size() > 0) {
+			unicast_sender = new UnicastSender(source_reader,
+				UnicastSender::client_mode, unicast_port, flags);
+			// Establish the unicast session
+			if (unicast_sender->session_init(*remaining_dst, nsources) != 0) {
+				source_reader->display_errors();
+				return EXIT_FAILURE;
+			}
+	
+			// Start the unicast_sender thread
+			int error;
+			error = pthread_create(&unicast_sender_thread, NULL,
+				unicast_sender_routine, (void *)unicast_sender);
+			if (error != 0) {
+				ERROR("Can't create a new thread: %s\n", strerror(errno));
+				exit(EXIT_FAILURE);
+			}
+			is_unicast_sender_started = true;
+		}
+	
+		delete remaining_dst;
+	
+		bool is_fatal_error_occurred = false;
+		if (source_reader->read_sources(filenames, filename_offsets) != 0) {
+			is_fatal_error_occurred = true;
+		}
+	
+		// Wait for the reader and multicast_sender
+		void *result;
+		if (is_unicast_sender_started) {
+			pthread_join(unicast_sender_thread, &result);
+			if (result != NULL) {
+				is_fatal_error_occurred = true;
+			}
+		}
+		if (is_multicast_sender_started) {
+			pthread_join(multicast_sender_thread, &result);
+			if (result != NULL) {
+				is_fatal_error_occurred = true;
+			}
+		}
 
-	if (remaining_dst->size() > 0) {
-		unicast_sender = new UnicastSender(source_reader, unicast_port);
-		// Establish the unicast session
-		if (unicast_sender->session_init(*remaining_dst, nsources) != 0) {
-			source_reader->display_error();
+		source_reader->display_errors();
+		if (source_reader->is_unrecoverable_error_occurred()) {
+			is_unrecoverable_error_occurred = true;
+		}
+		if (is_fatal_error_occurred) {
 			return EXIT_FAILURE;
 		}
 
-		// Start the unicast_sender thread
-		int error;
-		if ((error = pthread_create(&unicast_sender_thread, NULL,
-				unicast_sender_routine, (void *)unicast_sender)) != 0) {
-			ERROR("Can't create a new thread: %s\n", strerror(errno));
-			exit(EXIT_FAILURE);
+		SDEBUG("Finished, clean up the data\n");
+		if (multicast_sender != NULL) { delete multicast_sender; }
+		if (unicast_sender != NULL) { delete unicast_sender; }
+		for (int i = 0; i < nsources; ++i) {
+			free(filenames[i]);
 		}
-		is_unicast_sender_started = true;
-	}
-
-	delete remaining_dst;
-
-	bool display_error = false;
-	if (source_reader->read_sources(filenames) != 0) {
-		display_error = true;
-	}
-
-	// Wait for the reader and multicast_sender
-	void *result;
-	if (is_unicast_sender_started) {
-		pthread_join(unicast_sender_thread, &result);
-		if (result != NULL) {
-			display_error = true;
+		free(filenames);
+		free(filename_offsets);
+	
+		// Check if some file retransmissions required
+		filenames = source_reader->errors.get_retransmissions(&dst,
+			&filename_offsets);
+		if (dst.size() == 0) {
+			// Finish work, no retransmissions required
+			is_all_done = true;
+			SDEBUG("No retransmissions required\n");
+		} else {
+			// Retransmission required for some files
+			nsources = 2; // to use existing directory in the case when nsources has
+				// been equal to 1 initially
+			++n_retransmissions;
+			if (n_retransmissions > MAX_RETRANSMISSIONS) {
+				char **f = filenames;
+				string files;
+				string destinations;
+				vector<Destination>::const_iterator i = dst.begin();
+				while (1) {
+					char saddr[INET_ADDRSTRLEN];
+					uint32_t baddr = htonl((*i).addr);
+					destinations += inet_ntop(AF_INET, &baddr, saddr, sizeof(saddr));
+					++i;
+					if (i != dst.end()) {
+						destinations += ", ";
+					} else {
+						break;
+					}
+				}
+				while (1) {
+					files += *f;
+					++f;
+					if (*f != NULL) {
+						files += ", ";
+					} else {
+						break;
+					}
+				}
+				ERROR("Too many retransmissions for files %s to hosts %s\n",
+					files.c_str(), destinations.c_str());
+				return EXIT_FAILURE;
+			}
 		}
-	}
-	if (is_multicast_sender_started) {
-		pthread_join(multicast_sender_thread, &result);
-		if (result != NULL) {
-			display_error = true;
-		}
-	}
-	if (display_error) {
-		source_reader->display_error();
-	}
+	
+		delete source_reader;
+	} while (!is_all_done);
 
-	SDEBUG("Finished, clean up the data\n");
-	if (multicast_sender != NULL) { delete multicast_sender; }
-	if (unicast_sender != NULL) { delete unicast_sender; }
-	delete source_reader;
-	for (int i = 0; i < nsources; ++i) {
-		free(filenames[i]);
+	if (!is_unrecoverable_error_occurred) {
+		return EXIT_SUCCESS;
+	} else {
+		return EXIT_FAILURE;
 	}
-	free(filenames);
-	return EXIT_SUCCESS;
 }

@@ -16,6 +16,7 @@ multicast_sender.o \
 multicast_send_queue.o \
 multicast_receiver.o \
 multicast_recv_queue.o \
+multicast_error_queue.o \
 file_writer.o \
 path.o \
 distributor.o \
@@ -23,9 +24,8 @@ connection.o
 
 DEP_FILES = $(MCP_OBJECTS:.o=.d) $(MCPD_OBJECTS:.o=.d)
 
-
 #CXXFLAGS += -ggdb -Wall
-CXXFLAGS += -DNDEBUG -O2
+CXXFLAGS += -DNDEBUG -O2 -ggdb
 
 PROGRAMS = mcp mcpd
 

@@ -6,73 +6,225 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <set>
+#include <map>
 
 #include "distributor.h"
 #include "log.h"
 
-// Displays the fatal error registered by the writers (unicast sender
-// and multicast sender or by the reader
-void Distributor::display_error() {
-	if (reader.status >= STATUS_FIRST_FATAL_ERROR) {
-		ERROR("%s\n", reader.message);
-	} else if (unicast_sender.is_present &&
-			unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
-		if (unicast_sender.addr != INADDR_NONE) {
-			struct in_addr addr = {unicast_sender.addr};
-			char host_addr[INET_ADDRSTRLEN];
-			ERROR("from host %s: %s\n",
-				inet_ntop(AF_INET, &addr, host_addr, sizeof(host_addr)),
-				unicast_sender.message);
-		} else {
-			ERROR("%s\n", unicast_sender.message);
-		}
-	} else if (multicast_sender.is_present &&
-			multicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
-		// TODO: display errors
+using namespace std;
+
+void Distributor::SimpleError::display() const
+{
+	if (address != INADDR_NONE) {
+		char host_addr[INET_ADDRSTRLEN];
+		ERROR("from host %s: %s\n",
+			inet_ntop(AF_INET, &address, host_addr, sizeof(host_addr)),
+			message);
+	} else {
+		ERROR("%s\n", message);
 	}
 }
-
-// Sends the occurred error to the imediate source
-void Distributor::send_fatal_error(int sock) {
+void Distributor::SimpleError::send(int sock)
+{
 	try {
-		// Global error occured, send it to the immediate source
-		if (reader.status >= STATUS_FIRST_FATAL_ERROR) {
-			DEBUG("Reader finished with the error: %s\n", reader.message);
-			send_error(sock, reader.status, reader.addr, reader.message_length,
-				reader.message);
+		if (address == INADDR_NONE) {
+			// Get address from the current connection
+			struct sockaddr_in addr;
+			socklen_t addr_len = sizeof(addr);
+			
+			if(getsockname(sock, (struct sockaddr *)&addr, &addr_len) != 0) {
+				ERROR("Can't get address from socket: %s", strerror(errno));
+			} else {
+				address = addr.sin_addr.s_addr;
+			}
 		}
-		else if (unicast_sender.is_present &&
-				unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
-			struct in_addr addr = {unicast_sender.addr};
-#ifndef NDEBUG
-			char host_addr[INET_ADDRSTRLEN];
-			DEBUG("Unicast Sender finished with the error: (%s) %s\n",
-				inet_ntop(AF_INET, &addr, host_addr, sizeof(host_addr)),
-				unicast_sender.message);
-#endif
-			send_error(sock, unicast_sender.status,
-				unicast_sender.addr, unicast_sender.message_length,
-				unicast_sender.message);
-		} else if (file_writer.is_present &&
-				file_writer.status >= STATUS_FIRST_FATAL_ERROR) {
-			DEBUG("File writer finished with the error: %s\n", file_writer.message);
-			send_error(sock, file_writer.status, file_writer.addr,
-				file_writer.message_length, file_writer.message);
-		} else {
-			assert(multicast_sender.is_present &&
-				multicast_sender.status >= STATUS_FIRST_FATAL_ERROR);
-			// TODO: Display the multicast error
-			SERROR("multicast error\n");
-		}
+	
+		ReplyHeader h(status, address, message_length);
+		sendn(sock, &h, sizeof(h), 0);
+		sendn(sock, message, message_length, 0);
 	} catch (ConnectionException& e) {
 		ERROR("Can't send error to the source: %s\n", e.what());
 	}
 }
 
+Distributor::FileRetransRequest::FileRetransRequest(uint32_t addr,
+		const void *message, size_t message_length) :
+		ErrorMessage(STATUS_INCORRECT_CHECKSUM) {
+	assert(message_length > sizeof(FileInfoHeader));
+	if (message_length < sizeof(FileInfoHeader)) {
+		throw ConnectionException(ConnectionException::corrupted_data_received);
+	}
+	FileInfoHeader *fih = (FileInfoHeader *)message;
+	file_info_header = *fih;
+	assert(file_info_header.get_name_length() <= message_length -
+		sizeof(FileInfoHeader) - sizeof(uint32_t));
+	if (file_info_header.get_name_length() > message_length -
+			sizeof(FileInfoHeader) - sizeof(uint32_t)) {
+		throw ConnectionException(ConnectionException::corrupted_data_received);
+	}
+	filename = (char *)malloc(file_info_header.get_name_length());
+	memcpy(filename, fih + 1, file_info_header.get_name_length());
+	uint32_t *p = (uint32_t *)((uint8_t *)(fih + 1) +
+		file_info_header.get_name_length());
+	address = ntohl(*p);
+	while (p <=
+			(uint32_t *)((uint8_t *)message + message_length - sizeof(uint32_t))) {
+		destinations.push_back(Destination(ntohl(*p), NULL));
+		++p;
+	}
+}
+
+void Distributor::FileRetransRequest::display() const
+{
+	if (address != INADDR_NONE) {
+		char host_addr[INET_ADDRSTRLEN];
+		uint32_t h_addr = htonl(address);
+		ERROR("Retransmission request for %s from %s\n",
+			filename + file_info_header.get_name_offset(),
+			inet_ntop(AF_INET, &h_addr, host_addr, sizeof(host_addr)));
+	} else {
+		ERROR("%s\n", filename + file_info_header.get_name_offset());
+	}
+}
+
+void Distributor::FileRetransRequest::send(int sock)
+{
+	if (address == INADDR_NONE) {
+		// Get address from the current connection
+		struct sockaddr_in addr;
+		socklen_t addr_len = sizeof(addr);
+		
+		if(getsockname(sock, (struct sockaddr *)&addr, &addr_len) != 0) {
+			ERROR("Can't get address from socket: %s", strerror(errno));
+		} else {
+			address = addr.sin_addr.s_addr;
+		}
+	}
+
+	size_t message_length = sizeof(struct FileInfoHeader) + strlen(filename) +
+		sizeof(uint32_t) + destinations.size()  * sizeof(uint32_t);
+	uint8_t *message = (uint8_t *)malloc(message_length);
+
+	FileInfoHeader *fih = new(message) FileInfoHeader(file_info_header);
+	memcpy(fih + 1, filename, strlen(filename));
+	register uint32_t *n_destinations = (uint32_t *)((uint8_t*)(fih + 1) +
+		strlen(filename)); 
+	*n_destinations = destinations.size() + 1;
+	register uint32_t *addr = n_destinations + 1;
+	*addr = htonl(address);
+	++addr;
+	for (vector<Destination>::const_iterator i = destinations.begin();
+			i != destinations.end(); ++i) {
+		*addr = htonl(i->addr);
+		addr++;
+	}
+	*addr = htonl(INADDR_NONE);
+	try {
+		ReplyHeader h(status, address, message_length);
+		sendn(sock, &h, sizeof(h), 0);
+		sendn(sock, message, message_length, 0);
+	} catch (ConnectionException& e) {
+		ERROR("Can't file retransmission request to the source: %s\n", e.what());
+	}
+	free(message);
+}
+
+// Displays the fatal error registered by the writers (unicast sender
+// and multicast sender or by the reader
+void Distributor::Errors::display()
+{
+	pthread_mutex_lock(&mutex);
+	for (list<ErrorMessage*>::const_iterator i = errors.begin();
+			i != errors.end(); ++i) {
+		(*i)->display();
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
+// Returns true if some of the errors is unrecoverable (even if it is not
+// fatal) and false otherwise
+bool Distributor::Errors::is_unrecoverable_error_occurred()
+{
+	pthread_mutex_lock(&mutex);
+	bool result = false;
+	for (list<ErrorMessage*>::const_iterator i = errors.begin();
+			i != errors.end(); ++i) {
+		if ((*i)->status != STATUS_INCORRECT_CHECKSUM) {
+			result = true;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&mutex);
+	return result;
+}
+
+// Sends the occurred error to the imediate unicast source
+void Distributor::Errors::send(int sock)
+{
+	pthread_mutex_lock(&mutex);
+	while (errors.size() > 0) {
+		errors.front()->send(sock);
+		delete errors.front();
+		errors.pop_front();
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
+// Get the files that should be retransmitted. dest is a value/result
+// argument.
+char** Distributor::Errors::get_retransmissions(vector<Destination> *dest,
+		int **filename_offsets)
+{
+	set<uint32_t> addresses;
+	set<string> filenames;
+	map<string, int> offsets;
+	pthread_mutex_lock(&mutex);
+	for (list<ErrorMessage*>::const_iterator i = errors.begin();
+			i != errors.end(); ++i) {
+		if ((*i)->status == STATUS_INCORRECT_CHECKSUM) {
+			FileRetransRequest *frr = static_cast<FileRetransRequest*>(*i);
+			string fname(frr->filename);
+			filenames.insert(fname);
+			offsets[fname] = frr->file_info_header.get_name_offset();
+			if (frr->address != INADDR_NONE) {
+				addresses.insert(frr->address);
+			}
+		}
+	}
+	// Remove the excess destinations
+	unsigned i = 0;
+	while (i < dest->size()) {
+		if (addresses.find((*dest)[i].addr) == addresses.end()) {
+			(*dest)[i] = (*dest).back();
+			dest->pop_back();
+		} else {
+			++i;
+		}
+	}
+	// Get the filenames (cases with more than one file to retransmit are
+	// almost impossible)
+	char **result = (char **)malloc(sizeof(char *) * (filenames.size() + 1));
+	*filename_offsets = (int *)malloc(sizeof(int) * filenames.size());
+	int j = 0;
+	for (set<string>::const_iterator i = filenames.begin();
+			i != filenames.end(); ++i) {
+		result[j] = strdup(i->c_str());
+		(*filename_offsets)[j] = offsets[*i];
+		DEBUG("Pending retransmission for %s:%d\n", i->c_str(),
+			(*filename_offsets)[j]);
+		++j;
+	}
+
+	result[j] = NULL;
+	pthread_mutex_unlock(&mutex);
+	return result;
+}
+
 Distributor::Distributor() : is_reader_awaiting(false),
-		are_writers_awaiting(false) {
-	// The reader is always present. FIXME: It may worth to join
-	// the reader and the distributor
+		are_writers_awaiting(false)
+{
+	// The reader is always present
 	reader.is_present = true;
 
 	buffer = (uint8_t*)malloc(DEFAULT_BUFFER_SIZE);
@@ -81,13 +233,15 @@ Distributor::Distributor() : is_reader_awaiting(false),
 	pthread_cond_init(&data_ready_cond, NULL);
 	pthread_cond_init(&operation_ready_cond, NULL);
 	pthread_cond_init(&writers_finished_cond, NULL);
-	pthread_cond_init(&filewriter_done_cond, NULL);
 }
 
 // Adds a new task to the buffer, block until the previous task finished
-void Distributor::add_task(const TaskHeader& op) {
+void Distributor::add_task(const FileInfoHeader& fileinfo,
+		const char* filename)
+{
 	pthread_mutex_lock(&_mutex);
-	operation = op;
+	operation.fileinfo = fileinfo;
+	operation.set_filename(filename);
 	// Set the buffer to the default state
 	assert(reader.is_present);
 	reader.is_done = false;
@@ -118,7 +272,8 @@ void Distributor::add_task(const TaskHeader& op) {
 
 // Signal that the reader has finished the task and wait for the readers
 // Returns class of the most critical error
-uint8_t Distributor::finish_task() {
+uint8_t Distributor::finish_task()
+{
 	pthread_mutex_lock(&_mutex);
 	reader.is_done = true;
 
@@ -150,7 +305,8 @@ uint8_t Distributor::finish_task() {
 }
 
 // It is combination of the add_task for trailing task and finish_task
-uint8_t Distributor::finish_work() {
+uint8_t Distributor::finish_work()
+{
 	pthread_mutex_lock(&_mutex);
 	// Warning the task must be finished
 	while (!all_done()) {
@@ -161,7 +317,6 @@ uint8_t Distributor::finish_work() {
 	// Move the trailing record to the operation->fileinfo
 	memset(&operation.fileinfo, 0, sizeof(operation.fileinfo));
 
-	// Don't wait for the file writer
 	if (file_writer.is_present &&
 			file_writer.status < STATUS_FIRST_FATAL_ERROR) {
 		file_writer.is_done = false;
@@ -212,7 +367,8 @@ uint8_t Distributor::finish_work() {
 	the space will be available. Can be called only by the
 	reader.
 */
-int Distributor::get_data(Client *w) {
+int Distributor::get_data(Client *w)
+{
 	int count;
 	pthread_mutex_lock(&_mutex);
 	count = _get_data(w->offset);
@@ -245,7 +401,8 @@ int Distributor::get_data(Client *w) {
 	the space will be available. Can be called only by the
 	reader.
 */
-int Distributor::get_space() {
+int Distributor::get_space()
+{
 	int count;
 	pthread_mutex_lock(&_mutex);
 	count = _get_space();
@@ -267,7 +424,8 @@ int Distributor::get_space() {
 	return count;
 }
 
-void Distributor::update_reader_position(int count) {
+void Distributor::update_reader_position(int count)
+{
 	pthread_mutex_lock(&_mutex);
 #ifdef BUFFER_DEBUG
 	DEBUG("rposition update: %d -> ", reader.offset);
@@ -294,7 +452,8 @@ void Distributor::update_reader_position(int count) {
 
 // Move w->offset to the count bytes left (cyclic)
 // Count should not be greater than zero.
-void Distributor::update_writer_position(int count, Client *w) {
+void Distributor::update_writer_position(int count, Client *w)
+{
 	pthread_mutex_lock(&_mutex);
 #ifdef BUFFER_DEBUG
 	DEBUG("update_writer_position: %d -> ", w->offset);
@@ -313,7 +472,8 @@ void Distributor::update_writer_position(int count, Client *w) {
 }
 
 // Put data into the buffer
-void Distributor::put_data(void *data, int size) {
+void Distributor::put_data(void *data, int size)
+{
 	do {
 		int count = get_space();
 		count = std::min(count, size);
@@ -328,7 +488,8 @@ void Distributor::put_data(void *data, int size) {
 }
 
 // Put data into the buffer, checksum is not changed
-void Distributor::put_data_without_checksum_update(void *data, int size) {
+void Distributor::put_data_without_checksum_update(void *data, int size)
+{
 	do {
 		int count = get_space();
 		count = std::min(count, size);
@@ -340,39 +501,3 @@ void Distributor::put_data_without_checksum_update(void *data, int size) {
 	} while (size > 0);
 }
 
-// Writes data from the distributor to fd. Returns 0 on success or
-// errno of the last write call on failure
-int Distributor::Writer::write_to_file(int fd) {
-#ifndef NDEBUG
-	int total = 0;
-#endif
-	int count = get_data();
-	count = std::min(count, 16384); 
-	while (count > 0) {
-#ifdef BUFFER_DEBUG
-		DEBUG("Sending %d bytes of data\n", count);
-#endif
-		count = write(fd, pointer(), count);
-#ifndef NDEBUG
-		total += count;
-#endif
-#ifdef BUFFER_DEBUG
-		DEBUG("%d (%d) bytes of data sent\n", count, total);
-#endif
-		if (count > 0) {
-			update_position(count);
-		} else {
-			if (errno == ENOBUFS) {
-				SDEBUG("ENOBUFS error occurred\n");
-				usleep(200000);
-				continue;
-			}
-			return errno;
-		}
-
-		count = get_data();
-		count = std::min(count, 16384);
-	}
-	DEBUG("write_to_file: %d bytes wrote\n", total);
-	return 0;
-}

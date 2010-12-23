@@ -8,7 +8,8 @@
 
 // Structrure describing a destination (host to send files to and location
 // on this host)
-struct Destination {
+struct Destination
+{
 	uint32_t addr;
 #ifdef HAS_TR1_MEMORY
 	std::tr1::shared_ptr<char> filename;
@@ -16,7 +17,21 @@ struct Destination {
 	char *filename;
 #endif
 	Destination(int s, char *f) : addr(s), filename(f) {}
-	bool operator<(const Destination& arg) const {
+	Destination(const Destination& src)
+	{
+		addr = src.addr;
+		filename = src.filename;
+	}
+	Destination& operator=(const Destination& src)
+	{
+		if (this != &src) {
+			addr = src.addr;
+			filename = src.filename;
+		}
+		return *this;
+	}
+	bool operator<(const Destination& arg) const
+	{
 		return addr < arg.addr;
 	}
 };

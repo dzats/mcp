@@ -252,7 +252,8 @@ void MD5sum::transform(uint32_t buf[4], uint32_t in[16])
 	buf[3] += d;
 }
 
-void MD5sum::display_signature(FILE *stream, const unsigned char *signature) {
+void MD5sum::display_signature(FILE *stream, const unsigned char *signature)
+{
 	for (unsigned j = 0; j < 16; ++j) {
 		fprintf(stream, "%02x", signature[j]);
 	}

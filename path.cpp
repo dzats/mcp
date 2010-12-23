@@ -17,7 +17,8 @@
 
 // Returns the name of the target file
 const char* get_targetfile_name(const char *source_name,
-		const char *path, PathType path_type) {
+		const char *path, PathType path_type)
+{
 	// Figure out the file name
 	if (path_type == path_is_default_directory) {
 		return source_name;
@@ -44,7 +45,8 @@ const char* get_targetfile_name(const char *source_name,
 
 // Release the name returned by the get_targetfile_name function
 void free_targetfile_name(const char *filename,
-		PathType path_type) {
+		PathType path_type)
+{
 	if (path_type == path_is_directory ||
 			path_type == path_is_substituted_directory) {
 		free(const_cast<char *>(filename));
@@ -54,7 +56,8 @@ void free_targetfile_name(const char *filename,
 // Returns the name of the target directory. path_type
 // is a value-result argument
 const char* get_targetdir_name(const char *source_name,
-		const char *path, PathType *path_type) {
+		const char *path, PathType *path_type)
+{
 	// Figure out the directory name
 	if (*path_type == path_is_default_directory) {
 		return source_name;
@@ -84,7 +87,8 @@ const char* get_targetdir_name(const char *source_name,
 
 // Release the name returned by the get_targetdir_name function
 void free_targetdir_name(const char *dirname,
-		PathType path_type) {
+		PathType path_type)
+{
 	if (path_type == path_is_directory ||
 			path_type == path_is_substituted_directory) {
 		free(const_cast<char *>(dirname));
@@ -93,7 +97,8 @@ void free_targetdir_name(const char *dirname,
 
 // Detect the type of the 'path'. If this function returns path_is_invalid
 // 'error' points to the corresponding error message
-PathType get_path_type(const char *path, char **error, unsigned nsources) {
+PathType get_path_type(const char *path, char **error, unsigned nsources)
+{
 	assert(error != NULL);
 	size_t path_len = strlen(path);
 	if (path_len == 0) {

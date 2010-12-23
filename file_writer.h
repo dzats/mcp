@@ -2,12 +2,16 @@
 #define FILE_WRITER_H_HEADER 1
 
 #include "destination.h"
-#include "distributor.h"
+#include "writer.h"
+#include "unicast_receiver.h"
 #include "connection.h"
 #include "path.h"
 
 // Class that writes files and directories to the disk
-class FileWriter : public Distributor::Writer {
+class FileWriter : public Writer
+{
+	static const size_t FILE_READ_BUFFER_SIZE = 65536;
+
 	char *path;
 	PathType path_type;
 
@@ -15,11 +19,15 @@ class FileWriter : public Distributor::Writer {
 	FileWriter(const FileWriter&);
 	FileWriter& operator=(const FileWriter&);
 public:
-	FileWriter(Distributor* b) : Distributor::Writer(b,
-			(Distributor::Client *)&b->file_writer), path(NULL) {}
+	uint32_t flags;
+	UnicastReceiver *unicast_receiver;
+	FileWriter(UnicastReceiver* ur, uint32_t f) : Writer(ur,
+		(UnicastReceiver::Client *)&ur->file_writer), path(NULL), flags(f),
+		unicast_receiver(ur) {}
 	
 	// Initialization routine of the file writer class
-	void init(char* p, PathType pt) {
+	void init(char* p, PathType pt)
+	{
 		path = p;
 		path_type = pt;
 	}
@@ -30,7 +38,11 @@ public:
 
 private:
 	// Register an input/ouput error and finish the current task
-	void register_input_output_error(const char *fmt,
+	void register_error(uint8_t status, const char *fmt,
 		const char *filename, const char *error);
+
+	// Writes data from the distributor to fd. Returns 0 on success or
+	// errno of the last write call on failure
+	int write_to_file(int fd);
 };
 #endif

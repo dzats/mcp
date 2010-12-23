@@ -11,8 +11,10 @@
 #include "log.h"
 
 // Tries to establish TCP connection with the host 'addr'
-void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException) {
-	if ((sock = socket(PF_INET, SOCK_STREAM, 0)) == -1) {
+void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException)
+{
+	sock = socket(PF_INET, SOCK_STREAM, 0);
+	if (sock == -1) {
 		//ERROR("Can't create socket: %d\n", sock);
 		throw ConnectionException(errno);
 	}
@@ -27,25 +29,14 @@ void UnicastSender::connect_to(in_addr_t addr) throw (ConnectionException) {
 		sock = -1;
 		throw ConnectionException(errno);
 	}
-
-	int buffsize = 36600;
-	/*
-		This is work around some FreeBSD kernel bug in the sockatmark function.
-		FIXME: don't shure that this is correct solution.
-	*/
-	if (setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffsize,
-			sizeof(buffsize)) != 0) {
-		DEBUG("setsockopt error: %s\n", strerror(errno));
-		perror("setsockopt error");
-		throw ConnectionException(errno);
-	}
 }
 
 // Send the Unicast Session Initialization record
 void UnicastSender::send_initial_record(int nsources, char *path,
-		MD5sum *checksum) throw (ConnectionException) {
+		MD5sum *checksum) throw (ConnectionException)
+{
 	uint32_t path_len = path == NULL ? 0 : strlen(path);
-	UnicastSessionHeader ush(0, nsources, path_len);
+	UnicastSessionHeader ush(flags, nsources, path_len);
 	sendn(sock, &ush, sizeof(ush), 0);
 	checksum->update(&ush, sizeof(ush));
 	if (path_len > 0) {
@@ -58,7 +49,8 @@ void UnicastSender::send_initial_record(int nsources, char *path,
 void UnicastSender::send_destinations(
 		std::vector<Destination>::const_iterator i,
 		const std::vector<Destination>::const_iterator& _end,
-		MD5sum *checksum) throw (ConnectionException) {
+		MD5sum *checksum) throw (ConnectionException)
+{
 	for(; i != _end; ++i) {
 #ifdef HAS_TR1_MEMORY
 		int path_len = &*i->filename == NULL ? 0 : strlen(i->filename.get());
@@ -82,7 +74,8 @@ void UnicastSender::send_destinations(
 
 // Send the trailing record and checksum for all the previously sent data
 void UnicastSender::send_destination_trailing(
-		MD5sum *checksum) throw (ConnectionException) {
+		MD5sum *checksum) throw (ConnectionException)
+{
 	// Trailing record
 	DestinationHeader dh(0, 0);
 	sendn(sock, &dh, sizeof(dh), 0);
@@ -90,30 +83,66 @@ void UnicastSender::send_destination_trailing(
 }
 
 // Chooses the next destination 
-int UnicastSender::choose_destination(const std::vector<Destination>& dst) {
+int UnicastSender::choose_destination(const std::vector<Destination>& dst)
+{
 	// TODO: it could be useful to parse the local addresses and look for
 	// the nearest one destination by the topoligy in the list 
 	return 0;
 }
 
 // Register an error and finish the current task
-void UnicastSender::register_error(uint8_t status, const char *fmt,
-		const char *error) {
+void UnicastSender::register_error(uint8_t status, uint32_t address,
+		const char *fmt, const char *error)
+{
 	struct in_addr addr;
-	addr.s_addr = ntohl(target_address);
-	char hostname[INET_ADDRSTRLEN];
-	inet_ntop(AF_INET, &addr, hostname, sizeof(hostname));
+	addr.s_addr = ntohl(address);
+	char hostaddr[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &addr, hostaddr, sizeof(hostaddr));
 	// FIXME: use the strerror_r instead of the
 	// corresponding one without the _r suffix.
-	char *error_message = (char *)malloc(strlen(fmt) + strlen(hostname) +
+	char *error_message = (char *)malloc(strlen(fmt) + strlen(hostaddr) +
 		strlen(error) + 1); // a bit more that required
-	sprintf((char *)error_message, fmt, hostname, error);
+	sprintf((char *)error_message, fmt, hostaddr, error);
 	DEBUG("register error: %s\n", error_message);
-	buff->unicast_sender.set_error(INADDR_NONE, error_message,
-		strlen(error_message));
-	buff->unicast_sender.status = status;
+	reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
+		error_message, strlen(error_message)));
+	reader->unicast_sender.status = status;
 	// Finish the unicast sender
 	submit_task();
+}
+
+// Writes data (not more that size) from the distributor to sock.
+// Returns the number of bytes sent or (size + 1) on failure
+uint64_t UnicastSender::write_to_socket(int sock, uint64_t size)
+{
+	DEBUG("Write file of size %zu to the socket\n", (size_t)size);
+	uint64_t total = 0;
+	int count = get_data();
+	while (count > 0) {
+#ifdef BUFFER_DEBUG
+		DEBUG("Sending %d bytes of data\n", count);
+#endif
+		count = write(sock, pointer(), count);
+#ifdef BUFFER_DEBUG
+		DEBUG("%d (%zu) bytes of data sent\n", count, total);
+#endif
+		if (count > 0) {
+			total += count;
+			assert(total <= size);
+			update_position(count);
+		} else {
+			if (errno == ENOBUFS) {
+				SDEBUG("ENOBUFS error occurred\n");
+				usleep(200000);
+				continue;
+			}
+			return size + 1;
+		}
+
+		count = get_data();
+	}
+	DEBUG("write_to_file: %zu bytes've been written\n", (size_t)total);
+	return total;
 }
 
 /*
@@ -121,19 +150,20 @@ void UnicastSender::register_error(uint8_t status, const char *fmt,
 	session with one of the destinations.
 */
 int UnicastSender::session_init(const std::vector<Destination>& dst,
-		int nsources) {
+		int nsources)
+{
 	SDEBUG("UnicastSender::session_init called\n");
 	// Write the initial data of the session
 	unsigned destination_index = choose_destination(dst);
 	target_address = dst[destination_index].addr;
 	try {
 		// Establish connection with the nearest neighbor
-		int retries = MAX_INITIALIZATION_RETRIES;
-		bool do_retry;
+		int retries_remaining = MAX_INITIALIZATION_RETRIES;
+		bool is_retransmission_required;
 		connect_to(target_address);
 		do {
 			MD5sum checksum;
-			do_retry = false;
+			is_retransmission_required = false;
 #ifdef HAS_TR1_MEMORY
 			send_initial_record(nsources, dst[destination_index].filename.get(),
 				&checksum);
@@ -156,20 +186,20 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
 			// Get the reply
 			char *reply_message;
 			ReplyHeader h;
-			h.recv_reply(sock, &reply_message);
+			h.recv_reply(sock, &reply_message, 0);
 			DEBUG("Reply received, status: %d\n", h.get_status());
 			if (h.get_status() == STATUS_OK) {
 				// All ok
 			} else if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
-				if (--retries > 0) {
-					do_retry = true;
+				if (--retries_remaining > 0) {
+					is_retransmission_required = true;
 					// Retransmit the session initialization message
 					ERROR("Incorrect checksum, retransmit the session initialization "
 						"message in the %d time\n", MAX_INITIALIZATION_RETRIES -
-						retries);
+						retries_remaining);
 				} else {
 					// Fatal error: Too many retransmissions
-					register_error(STATUS_UNICAST_INIT_ERROR,
+					register_error(STATUS_UNICAST_INIT_ERROR, target_address,
 						"Can't establish unicast connection with the host %s: %s",
 						"Too many retransmissions");
 					close(sock);
@@ -180,15 +210,17 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
 				// Fatal error occurred during the session establishing
 				DEBUG("Fatal error received: %s\n", reply_message);
 				// Register the error
-				buff->unicast_sender.status = h.get_status();
-				buff->unicast_sender.set_error(h.get_address(), reply_message,
-					h.get_msg_length());
+				reader->errors.add(new Reader::SimpleError(h.get_status(),
+					h.get_address(), reply_message, h.get_msg_length()));
+				if (reader->unicast_sender.status < h.get_status()) {
+					reader->unicast_sender.status = h.get_status();
+				}
 				submit_task();
 				close(sock);
 				sock = -1;
 				return -1;
 			}
-		} while (do_retry);
+		} while (is_retransmission_required);
 		SDEBUG("Connection established\n");
 		return 0;
 	} catch (ConnectionException& e) {
@@ -198,11 +230,11 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
 			DEBUG("Connection exception %s, Try to get an error\n", e.what());
 			char *reply_message;
 			ReplyHeader h;
-			h.recv_reply(sock, &reply_message);
+			h.recv_reply(sock, &reply_message, 0);
 			if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
-				buff->unicast_sender.set_error(h.get_address(), reply_message,
-					strlen(reply_message));
-				buff->unicast_sender.status = h.get_status();
+				reader->errors.add(new Reader::SimpleError(h.get_status(),
+					h.get_address(), reply_message, strlen(reply_message)));
+				reader->unicast_sender.status = h.get_status();
 				submit_task();
 				close(sock);
 				sock = -1;
@@ -211,7 +243,7 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
 		} catch(std::exception& e) {
 			// Can't receive an error, generate it
 		}
-		register_error(STATUS_UNICAST_INIT_ERROR,
+		register_error(STATUS_UNICAST_INIT_ERROR, target_address,
 			"Can't establish unicast connection with the host %s: %s", e.what());
 		close(sock);
 		sock = -1;
@@ -223,7 +255,8 @@ int UnicastSender::session_init(const std::vector<Destination>& dst,
 	This is the main routine of the unicast sender. This routine sends
 	the files and directories to the next destination.
 */
-int UnicastSender::session() {
+int UnicastSender::session()
+{
 	try {
 		bool is_trailing = false; // Whether the current task is the trailing one
 		do {
@@ -233,8 +266,44 @@ int UnicastSender::session() {
 				// Send the trailing zero record
 				SDEBUG("Send the trailing record\n");
 				is_trailing = true;
-				FileInfoHeader h(0, 0, 0);
-				sendn(sock, &h, sizeof(h), 0);
+				FileInfoHeader fih;
+				sendn(sock, &fih, sizeof(fih), 0);
+				// Wait for the session termination
+				char *reply_message;
+				ReplyHeader h;
+				while (h.recv_reply(sock, &reply_message, 0) == 0) {
+					// Some reply received
+					if (w->status < h.get_status()) {
+						w->status = h.get_status();
+					}
+					if (h.get_status() == STATUS_OK) {
+						// All done
+						break;
+					} else if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
+						// Request for the file retransmission (done by the previous code)
+						SDEBUG("Incorrect checksum, request for a file retransmission\n");
+						reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
+							reply_message, h.get_msg_length()));
+						if (reader->unicast_sender.status < h.get_status()) {
+							reader->unicast_sender.status = h.get_status();
+						}
+					} else if(h.get_status() != STATUS_OK) {
+						// Fatal error occurred during the connection
+						SDEBUG("An error received\n");
+						reader->errors.add(new Reader::SimpleError(h.get_status(),
+							h.get_address(), reply_message, h.get_msg_length()));
+						if (reader->unicast_sender.status < h.get_status()) {
+							reader->unicast_sender.status = h.get_status();
+						}
+						if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
+							// Finish work in the case of a fatal error
+							submit_task();
+							close(sock);
+							sock = -1;
+							return -1;
+						}
+					}
+				}
 			} else {
 				assert(op->fileinfo.get_name_length() < 1024);
 				// Send the file info structure
@@ -243,26 +312,45 @@ int UnicastSender::session() {
 				FileInfoHeader *file_h =
 					reinterpret_cast<FileInfoHeader *>(info_header);
 				*file_h = op->fileinfo;
-#ifndef NDEBUG
-				SDEBUG("fileinfo: ");
-				file_h->print();
-#endif
-				memcpy(info_header + sizeof(FileInfoHeader), op->filename.c_str(),
+				DEBUG("Fileinfo: |%u| %o | %u / %u  |\n", file_h->get_type(),
+				 	file_h->get_mode(), file_h->get_name_length(),
+					file_h->get_name_offset());
+				memcpy(info_header + sizeof(FileInfoHeader), op->get_filename(),
 				op->fileinfo.get_name_length());
 				sendn(sock, info_header, sizeof(info_header), 0);
 
 				if (op->fileinfo.get_type() == resource_is_a_file) {
-					DEBUG("Send file: %s\n", op->filename.c_str());
+					DEBUG("Send file: %s\n",
+						op->get_filename() + op->fileinfo.get_name_offset());
 					// Send the file
-					int write_result;
-					if ((write_result = write_to_file(sock)) != 0) {
+					uint64_t write_result;
+					if ((write_result = write_to_socket(sock,
+							op->fileinfo.get_file_size())) > op->fileinfo.get_file_size()) {
 						// It's is the connection error throw appropriate exception
 						throw ConnectionException(errno);
 					}
-					// Send the trailing character
-					static const unsigned char zero = '\0';
-					sendn(sock, &zero, 1, MSG_OOB);
-					SDEBUG("Out-of-band data sent\n");
+					if (write_result != op->fileinfo.get_file_size()) {
+						// File has been shrinked or enlarged during the transmission
+						static const uint8_t trailing = OOB_FILE_SIZE_CHANGED;
+						sendn(sock, &trailing, 1, MSG_OOB);
+						SDEBUG("Out-of-band data 1 sent\n");
+						uint64_t n_bytes_delivered;
+						do {
+							recvn(sock, &n_bytes_delivered, sizeof(n_bytes_delivered), 0);
+							n_bytes_delivered = ntoh64(n_bytes_delivered);
+						} while (n_bytes_delivered != write_result);
+						// Send the trailing character OOB character
+						static const uint8_t final = OOB_FILE_TRANSMISSION_DONE;
+						sendn(sock, &final, 1, MSG_OOB);
+						SDEBUG("Out-of-band data 2 sent\n");
+						// Waiting for acknowledgement of the trailing OOB date reception
+						uint8_t byte;
+						recvn(sock, &byte, sizeof(byte), 0);
+						if (byte != 0) {
+							throw ConnectionException(
+								ConnectionException::corrupted_data_received);
+						}
+					}
 					// Send the checksum
 #ifndef NDEBUG
 					SDEBUG("Send the checksum: ");
@@ -271,29 +359,48 @@ int UnicastSender::session() {
 #endif
 					sendn(sock, checksum()->signature, sizeof(checksum()->signature), 0);
 				}
-			}
-			// Wait for an acknowledgement
-			char *reply_message;
-			ReplyHeader h;
-			h.recv_reply(sock, &reply_message);
-			w->status = h.get_status();
-			DEBUG("Received acknowledgement with status %u\n", h.get_status());
-			if (h.get_status() == STATUS_OK) {
-				// All ok
-				SDEBUG("Successfull acknowledgement returned\n");
-			} else if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
-				// Request for the file retransmission (done by the previous code)
-				SERROR("Incorrect checksum, request the file retransmission\n");
-			} else {
-				// Fatal error occurred during the connection
-				SDEBUG("Fatal error received\n");
-				buff->unicast_sender.status = h.get_status();
-				buff->unicast_sender.set_error(h.get_address(), reply_message,
-					h.get_msg_length());
-				submit_task();
-				close(sock);
-				sock = -1;
-				return -1;
+				// Check whether some errors occurrred
+				char *reply_message;
+				ReplyHeader h;
+				if (h.recv_reply(sock, &reply_message, MSG_DONTWAIT) == 0) {
+					// Some reply received
+					if (w->status < h.get_status()) {
+						w->status = h.get_status();
+					}
+					if (h.get_status() == STATUS_INCORRECT_CHECKSUM) {
+						// Request for the file retransmission (done by the previous code)
+						SDEBUG("Incorrect checksum, request for a file retransmission\n");
+						reader->errors.add(new Reader::FileRetransRequest(h.get_address(),
+							reply_message, h.get_msg_length()));
+						if (reader->unicast_sender.status < h.get_status()) {
+							reader->unicast_sender.status = h.get_status();
+						}
+					} else if(h.get_status() != STATUS_OK) {
+						// An error occurred during the connection
+						SDEBUG("An error received\n");
+						if (reader->unicast_sender.status < h.get_status()) {
+							reader->unicast_sender.status = h.get_status();
+						}
+						if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
+							// Finish work in the case of a fatal error
+							reader->errors.add(new Reader::SimpleError(h.get_status(),
+								h.get_address(), reply_message, h.get_msg_length()));
+							submit_task();
+							close(sock);
+							sock = -1;
+							return -1;
+						} else {
+							if (mode == client_mode) {
+								// Display non-fatal errors immediately
+								Reader::SimpleError(h.get_status(), h.get_address(),
+									reply_message, h.get_msg_length()).display();
+							} else {
+								reader->errors.add(new Reader::SimpleError(h.get_status(),
+									h.get_address(), reply_message, h.get_msg_length()));
+							}
+						}
+					}
+				}
 			}
 			submit_task();
 		} while (!is_trailing);
@@ -302,13 +409,14 @@ int UnicastSender::session() {
 		try {
 			DEBUG("Connection exception %s, Try to get an error\n", e.what());
 			// Try to get an error from the immediate destination
+			// FIXME: rewrite this (errors can come from both directions)
 			char *reply_message;
 			ReplyHeader h;
-			h.recv_reply(sock, &reply_message);
+			h.recv_reply(sock, &reply_message, 0);
 			if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
-				buff->unicast_sender.set_error(h.get_address(), reply_message,
-					strlen(reply_message));
-				buff->unicast_sender.status = h.get_status();
+				reader->errors.add(new Reader::SimpleError(h.get_status(),
+					h.get_address(), reply_message, strlen(reply_message)));
+				reader->unicast_sender.status = h.get_status();
 				submit_task();
 				close(sock);
 				sock = -1;
@@ -317,7 +425,7 @@ int UnicastSender::session() {
 		} catch(std::exception& e) {
 			// Can't receive an error, generate it
 		}
-		register_error(STATUS_UNICAST_CONNECTION_ERROR,
+		register_error(STATUS_UNICAST_CONNECTION_ERROR, target_address,
 			"Error during unicast transmission with the host %s: %s", e.what());
 		close(sock);
 		sock = -1;

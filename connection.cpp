@@ -8,7 +8,8 @@
 using namespace std;
 
 // Receive 'size' bytes from 'sock' and places them to 'data'
-void recvn(int sock, void *data, size_t size, int flags) {
+void recvn(int sock, void *data, size_t size, int flags)
+{
 	do {
 		register int bytes_recvd = recv(sock, data, size, flags);
 		if (bytes_recvd <= 0) {
@@ -21,7 +22,8 @@ void recvn(int sock, void *data, size_t size, int flags) {
 }
 
 // Send 'size' bytes from 'data' to 'sock'
-void sendn(int sock, const void *data, size_t size, int flags) {
+void sendn(int sock, const void *data, size_t size, int flags)
+{
 	do {
 		register int bytes_sent = send(sock, data, size, flags);
 		if (bytes_sent < 0) {
@@ -39,47 +41,53 @@ void sendn(int sock, const void *data, size_t size, int flags) {
 	} while(size > 0);
 }
 
-// Receives reply from 'sock'
-void ReplyHeader::recv_reply(int sock, char **message) {
-	recvn(sock, &status, sizeof(status), 0);
-	if (get_status() != STATUS_OK &&
-			get_status() != STATUS_INCORRECT_CHECKSUM) {
-		recvn(sock, &address, sizeof(ReplyHeader) - sizeof(status), 0);
-
-		if (get_msg_length() > MAX_ERROR_LENGTH) {
-			throw ConnectionException(ConnectionException::corrupted_data_received);
-		}
-		*message = (char *)malloc(get_msg_length() + 1);
-		(*message)[get_msg_length()] = '\0';
-		recvn(sock, *message, get_msg_length(), 0);
-		DEBUG("Received error message: %u, %x, %u, %s\n", get_status(),
-			get_address(), get_msg_length(), *message);
-	}
+void send_normal_conformation(int sock, uint32_t addr)
+{
+	ReplyHeader rh(STATUS_OK, addr, 0);
+	sendn(sock, &rh, sizeof(rh), 0);
 }
 
-// Sends error to the 'sock'
-void send_error(int sock, uint32_t status, uint32_t address,
-		uint32_t msg_length, char *msg) {
-	if (address == INADDR_NONE) {
-		// Get address from the current connection
-		struct sockaddr_in addr;
-		socklen_t addr_len = sizeof(addr);
-		
-		if(getsockname(sock, (struct sockaddr *)&addr, &addr_len) != 0) {
-			ERROR("Can't get address from socket: %s", strerror(errno));
-		} else {
-			address = addr.sin_addr.s_addr;
-		}
-	}
+void send_incorrect_checksum(int sock, uint32_t addr)
+{
+	ReplyHeader rh(STATUS_INCORRECT_CHECKSUM, addr, 0);
+	sendn(sock, &rh, sizeof(rh), 0);
+}
 
-	ReplyHeader h(status, address, msg_length);
-	sendn(sock, &h, sizeof(h), 0);
-	sendn(sock, msg, msg_length, 0);
+// Receives reply from 'sock'. Returns 0 if some reply has been received
+// and -1 otherwise
+int ReplyHeader::recv_reply(int sock, char **message, int flags)
+{
+	register int recv_result;
+	recv_result = recv(sock, this, sizeof(ReplyHeader), flags);
+	if (recv_result > 0) {
+		// Something received
+		if ((unsigned)recv_result < sizeof(ReplyHeader)) {
+			// Receive remaining part of the header
+			recvn(sock, (uint8_t *)this + recv_result,
+				sizeof(ReplyHeader) - recv_result, 0);
+		}
+		if (get_msg_length() > MAX_ERROR_LENGTH) {
+			throw ConnectionException(ConnectionException::corrupted_data_received);
+		} else if (get_msg_length() > 0) {
+			*message = (char *)malloc(get_msg_length() + 1);
+			(*message)[get_msg_length()] = '\0';
+			recvn(sock, *message, get_msg_length(), 0);
+			DEBUG("Received error message: %u, %x, %u, %s\n", get_status(),
+				get_address(), get_msg_length(), *message);
+		}
+		return 0;
+	} else {
+		if ((flags & MSG_DONTWAIT) == 0 || errno != EAGAIN) {
+			throw ConnectionException(errno);
+		}
+		return -1;
+	}
 }
 
 // Returns internet addresses, which the host has
 // The returned value should be futher explicitly deleted.
-vector<uint32_t>* get_interfaces(int sock) {
+vector<uint32_t>* get_interfaces(int sock)
+{
 	struct ifconf ifc;
 	vector<uint32_t> *addresses = new vector<uint32_t>;
 

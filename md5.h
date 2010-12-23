@@ -24,8 +24,10 @@
 #undef HIGHFIRST
 #endif
 
-class MD5sum {
-	struct MD5Context {
+class MD5sum
+{
+	struct MD5Context
+	{
     uint32_t buf[4];
     uint32_t bits[2];
     unsigned char in[64];

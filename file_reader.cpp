@@ -26,7 +26,9 @@ using namespace std;
 	on suceess and something else otherwise (error can be
 	detected by the distributor's state).
 */
-int FileReader::read_sources(char **filenames) {
+int FileReader::read_sources(char **filenames, int *filename_offsets)
+{
+	int i = 0;
 	while(*filenames != NULL) {
 		// Detect whether *filenames is a file or a directory
 		struct stat fs;
@@ -45,11 +47,10 @@ int FileReader::read_sources(char **filenames) {
 			// *filenames should be already fixed up by the 
 			// prepare_to_basename routine (mcp.cpp)
 			char *basename;
-			int basename_offset;
-			if ((basename = strrchr(*filenames, '/')) != NULL) {
+			int basename_offset = filename_offsets[i];
+			if (basename_offset == 0 &&
+					(basename = strrchr(*filenames, '/')) != NULL) {
 				basename_offset = basename - *filenames + 1;
-			} else {
-				basename_offset = 0;
 			}
 			if (handle_file(*filenames, &fs, basename_offset, true) != 0) {
 				return -1;
@@ -59,21 +60,109 @@ int FileReader::read_sources(char **filenames) {
 			return -1;
 		}
 		++filenames;
+		++i;
 	}
 
 	SDEBUG("All sources read, finish the task\n");
 	return finish_work();
 }
 
+// Reads data from fd (till the end of file) and passes it to
+// the distributor. Returns 0 on success and errno on failure.
+int FileReader::read_from_file(int fd, off_t size)
+{
+	while(size > 0) {
+		unsigned count = get_space();
+		count = std::min(count, (unsigned)4096);
+		if (count > size) {
+			count = size;
+		}
+	
+#ifdef BUFFER_DEBUG
+		DEBUG("Free space in the buffer: %d bytes\n", count);
+#endif
+		count = read(fd, rposition(), count);
+		if (count > 0) {
+			// Update the checksum
+			checksum.update((unsigned char *)rposition(), count);
+			update_reader_position(count);
+			size -= count;
+#ifdef BUFFER_DEBUG
+			DEBUG("%d (%lu) bytes of data read\n", count, size);
+#endif
+		} else if(count == 0) {
+			// End of file encountered
+			DEBUG("read_file: %zu bytes have not been read\n", (size_t)size);
+			checksum.final();
+			return 0;
+		} else {
+			return errno;
+		}
+	}
+
+	// File has been read
+	SDEBUG("file has been completely read\n");
+	checksum.final();
+	return 0;
+}
+
+// Reads the file 'filename' and pass it to the distributor
+int FileReader::handle_file(const char *filename, struct stat *statp,
+		int basename_offset, bool error_if_cant_open)
+{
+	/* Open the input file */
+	int fd;
+	fd = open(filename, O_RDONLY);
+	if (fd == -1) {
+		// Should be non-fatal in the recursive case
+		DEBUG("Can't open the file %s: %s\n", filename, strerror(errno));
+		if (error_if_cant_open) {
+			DEBUG("Can't open the file %s: %s\n", filename, strerror(errno));
+			register_error(STATUS_FATAL_DISK_ERROR,
+				"Can't open the file %s: %s\n", filename, strerror(errno));
+			return -1;
+		} else {
+			ERROR("Can't open the file %s: %s\n", filename, strerror(errno));
+			return 0;
+		}
+	}
+
+	// Start the file transfert operation for the distributor
+	FileInfoHeader f_info(resource_is_a_file,
+		statp->st_mode & ~S_IFMT, strlen(filename), basename_offset,
+		statp->st_size);
+	add_task(f_info, filename);
+
+	// Read file from the disk
+	int read_result;
+	read_result = read_from_file(fd, statp->st_size);
+	if (read_result != 0) {
+		DEBUG("Read error for the file %s: %s\n", filename, strerror(errno));
+		register_error(STATUS_FATAL_DISK_ERROR, "Read error for the file %s: %s\n",
+			filename, strerror(errno));
+		return -1;
+	}
+	close(fd);
+	uint8_t status = finish_task();
+
+	// Check the result of writers
+	if (status >= STATUS_FIRST_FATAL_ERROR) {
+		// One of the writers finished with a fatal error
+		finish_work();
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
 // Reads information about the directory 'dirname' and pass it to
 // the distributor
 int FileReader::handle_directory(char *dirname, struct stat *statp,
-		int rootdir_basename_offset) {
-	int dirname_length = strlen(dirname + rootdir_basename_offset);
+		int rootdir_basename_offset)
+{
 	FileInfoHeader d_info(resource_is_a_directory,
-		statp->st_mode & ~S_IFMT, dirname_length);
-	Distributor::TaskHeader op = {d_info, dirname + rootdir_basename_offset};
-	add_task(op);
+		statp->st_mode & ~S_IFMT, strlen(dirname), rootdir_basename_offset, 0);
+	add_task(d_info, dirname);
 	if (finish_task() >= STATUS_FIRST_FATAL_ERROR) {
 		finish_work();
 		return -1;
@@ -84,7 +173,8 @@ int FileReader::handle_directory(char *dirname, struct stat *statp,
 // Implements recursive behavior for the directory 'name'.
 // Uses the handle_file and handle_directory functions.
 int FileReader::handle_directory_with_content(char *name,
-		struct stat *statp) {
+		struct stat *statp)
+{
 	DIR *dirp;
 	struct dirent *dp;
 

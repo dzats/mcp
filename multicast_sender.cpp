@@ -3,12 +3,12 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/param.h> // for MAXPATHLEN
-#include <sys/time.h> // for gettimeofday
 #include <poll.h>
 
 #include <pthread.h>
 
 #include <vector>
+#include <set>
 #include <algorithm>
 
 using namespace std;
@@ -16,7 +16,8 @@ using namespace std;
 #include "multicast_sender.h"
 
 // A helper function that chooses a UDP port and binds socket with it
-uint16_t MulticastSender::choose_ephemeral_port() {
+uint16_t MulticastSender::choose_ephemeral_port()
+{
 	uint16_t ephemeral_port;
 	struct sockaddr_in ephemeral_addr;
 	memset(&ephemeral_addr, 0, sizeof(ephemeral_addr));
@@ -27,7 +28,7 @@ uint16_t MulticastSender::choose_ephemeral_port() {
 	int tries = MAX_PORT_CHOOSING_TRIES;
 	do {
 		// Randomly choose the ephemeral UDP port to use
-		// FIXME: It can be not the best decisition
+		// FIXME: It can be not very good decisition
 		ephemeral_port = 49152 + rand() % (65536 - 49152);
 		ephemeral_addr.sin_port = htons(ephemeral_port);
 		DEBUG("try ephemeral UDP port: %d\n", ephemeral_port);
@@ -40,13 +41,16 @@ uint16_t MulticastSender::choose_ephemeral_port() {
 
 // Register an error and finish the current task
 void MulticastSender::register_error(uint8_t status, const char *fmt,
-		const char *error) {
+		const char *error)
+{
 	char *error_message = (char *)malloc(strlen(fmt) + strlen(error) + 1);
 	sprintf((char *)error_message, fmt, error);
 	DEBUG("register error: %s\n", error_message);
-	buff->multicast_sender.set_error(INADDR_NONE, error_message,
-		strlen(error_message));
-	buff->multicast_sender.status = status;
+	reader->errors.add(new Reader::SimpleError(status, INADDR_NONE,
+		error_message, strlen(error_message)));
+	if (reader->multicast_sender.status < status) {
+		reader->multicast_sender.status = status;
+	}
 	// Finish the multicast sender
 	submit_task();
 }
@@ -58,7 +62,8 @@ void MulticastSender::register_error(uint8_t status, const char *fmt,
 	with.
 */
 std::vector<Destination>* MulticastSender::session_init(
-		const std::vector<Destination>& dst, int nsources) {
+		const std::vector<Destination>& dst, int nsources)
+{
 	// Clear the previous connection targets
 	targets.clear();
 	
@@ -68,7 +73,8 @@ std::vector<Destination>* MulticastSender::session_init(
 	target_address.sin_addr.s_addr = address;
 	target_address.sin_port = htons(port);
 
-	if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock == -1) {
 		ERROR("Can't create a UDP socket: %s\n", strerror(errno));
 		register_error(STATUS_UNKNOWN_ERROR, "Can't create a UDP socket: %s",
 			strerror(errno));
@@ -90,7 +96,6 @@ std::vector<Destination>* MulticastSender::session_init(
 	unsigned init_message_length = sizeof(MulticastMessageHeader) +
 		dst.size() * sizeof(MulticastHostRecord);
 	uint8_t init_message[init_message_length];
-	session_id = getpid();
 	MulticastMessageHeader *mmh =
 		new(init_message)MulticastMessageHeader(MULTICAST_INIT_REQUEST, session_id);
 
@@ -192,7 +197,7 @@ std::vector<Destination>* MulticastSender::session_init(
 				break;
 			} else {
 				ERROR("poll: %s\n", strerror(errno));
-				register_error(STATUS_UNKNOWN_ERROR, "poll: %s", strerror(errno));
+				register_error(STATUS_UNKNOWN_ERROR, "poll error: %s", strerror(errno));
 				return NULL;
 			}
 		} while(1);
@@ -224,7 +229,8 @@ finish_session_initialization:
 
 // Routine that controls the multicast packets delivery,
 // should be started in a separate thread
-void MulticastSender::multicast_delivery_control() {
+void MulticastSender::multicast_delivery_control()
+{
 	uint8_t * const buffer = new uint8_t[UDP_MAX_LENGTH];
 	const auto_ptr<uint8_t> buffer_guard(buffer);
 	struct sockaddr_in client_addr;
@@ -234,12 +240,7 @@ void MulticastSender::multicast_delivery_control() {
 		int length = recvfrom(sock, buffer, UDP_MAX_LENGTH, 0,
 			(struct sockaddr*)&client_addr, &client_addr_len);
 		DEBUG("Received a message of length %d\n", length);
-		if (length < 0) {
-			// FIXME: do something else here, however this code is probably
-			// unreachable
-			ERROR("recvfrom returned: %s\n", strerror(errno));
-			abort(); // FIXME: change this behavior
-		} else if ((unsigned)length >= sizeof(MulticastMessageHeader)) {
+		if ((unsigned)length >= sizeof(MulticastMessageHeader)) {
 			MulticastMessageHeader *mmh = (MulticastMessageHeader *)buffer;
 			if (mmh->get_session_id() != session_id) {
 				DEBUG("Incorrect session id: %u\n", mmh->get_session_id());
@@ -250,18 +251,22 @@ void MulticastSender::multicast_delivery_control() {
 				targets.begin(), targets.end(),
 				Destination(mmh->get_responder(), NULL));
 			if (i == targets.end() || i->addr != mmh->get_responder()) {
+#ifndef NDEBUG
 				char addr[INET_ADDRSTRLEN];
 				uint32_t responder = htonl(mmh->get_responder());
 				DEBUG("reply from an unknown host %s received\n",
 					inet_ntop(AF_INET, &responder, addr, sizeof(addr)));
+#endif
 				continue;
 			}
 			switch (mmh->get_message_type()) {
 				case MULTICAST_MESSAGE_RETRANS_REQUEST: {
 						// TODO: somehow limit the rate of retransmissions
-						DEBUG("Retransmission for the packet %u\n", mmh->get_number());
+						DEBUG("Retransmission request for the packet %u\n",
+							mmh->get_number());
 						size_t size;
-						void *message = send_queue->get_message(&size, mmh->get_number());
+						void *message = send_queue->get_message_for_retransmission(&size,
+							mmh->get_number());
 						if (message != 0) {
 							udp_send(message, size, 0);
 						}
@@ -275,20 +280,84 @@ void MulticastSender::multicast_delivery_control() {
 						}
 						break;
 					}
+				case MULTICAST_ERROR_MESSAGE:
+				case MULTICAST_FILE_RETRANS_REQUEST: {
+						struct timeval tv;
+						gettimeofday(&tv, NULL);
+						ErrorMessage em = ErrorMessage(mmh->get_number(),
+							mmh->get_responder(), tv);
+#ifndef NDEBUG
+						char addr[INET_ADDRSTRLEN];
+						uint32_t source = htonl(mmh->get_responder());
+						DEBUG("Error message(%x) %s:%u received\n", mmh->get_message_type(),
+							inet_ntop(AF_INET, &source, addr, sizeof(addr)),
+							mmh->get_number());
+#endif
+						// Send reply to the source
+						MulticastMessageHeader reply(MULTICAST_RECEPTION_CONFORMATION,
+							session_id);
+						reply.set_number(mmh->get_number());
+						reply.set_responder(mmh->get_responder());
+						struct sockaddr_in dest;
+						dest.sin_family = AF_INET;
+						dest.sin_addr = client_addr.sin_addr;
+						dest.sin_port = target_address.sin_port;
+						// FIXME: change sendto to something more general
+						int sendto_result;
+						do {
+							sendto_result = sendto(sock, &reply, sizeof(reply), 0,
+								(struct sockaddr *)&dest, sizeof(dest));
+						} while (sendto_result < 0 && errno == ENOBUFS);
+						if (sendto_result < 0) {
+							ERROR("sendto error: %s\n", strerror(errno));
+							abort();
+						}
+						if (received_errors.find(em) == received_errors.end()) {
+							SDEBUG("Add the message into the error queue\n");
+							received_errors.insert(em);
+							if (received_errors.size() >
+									targets.size() * MAX_ERROR_QUEUE_SIZE_MULTIPLICATOR) {
+								// Error queue is overflowed, remove an outdated error
+								// FIXME: Choose the error to delete somehow else using
+								// the timestamps
+								received_errors.erase(received_errors.begin());
+							}
+							// Add message into the error queue
+							if (mmh->get_message_type() == MULTICAST_ERROR_MESSAGE) {
+								ReplyHeader *rh = (ReplyHeader *)(mmh + 1);
+								reader->errors.add(new Reader::SimpleError(rh->get_status(),
+									rh->get_address(), (char *)(rh + 1), rh->get_msg_length()));
+							} else {
+								assert(mmh->get_message_type() ==
+									MULTICAST_FILE_RETRANS_REQUEST);
+								FileInfoHeader *fih = (FileInfoHeader *)(mmh + 1);
+								reader->errors.add(new Reader::FileRetransRequest(
+									(char *)(fih + 1), // file name
+									*fih, mmh->get_responder(), vector<Destination>())); 
+							}
+						}
+						break;
+					}
 				default:
 					DEBUG("Unexpected message type: %x\n", mmh->get_message_type());
 					// FIXME: it should not be a fatal case
 					continue;
 			}
-		} else {
-			SDEBUG("Corrupted datagram received");
+		} else if (length >= 0) {
+			SDEBUG("Corrupted datagram received\n");
 			continue;
+		} else {
+			// FIXME: do something else here, however this code is probably
+			// unreachable
+			ERROR("recvfrom returned: %s\n", strerror(errno));
+			abort(); // FIXME: change this behavior
 		}
 	}
 }
 
 // A wrapper function for multicast_delivery_control
-void* MulticastSender::multicast_delivery_thread(void *arg) {
+void* MulticastSender::multicast_delivery_thread(void *arg)
+{
 	MulticastSender *ms = (MulticastSender *)arg;
 	ms->multicast_delivery_control();
 
@@ -297,7 +366,8 @@ void* MulticastSender::multicast_delivery_thread(void *arg) {
 }
 
 // helper fuction that sends 'message' to the udp socket
-void MulticastSender::udp_send(const void *message, int size, int flags) {
+void MulticastSender::udp_send(const void *message, int size, int flags)
+{
 #ifndef NDEBUG
 	char taddr[INET_ADDRSTRLEN];
 	DEBUG("send a udp message %d, %d bytes to %s:%d\n",
@@ -306,12 +376,15 @@ void MulticastSender::udp_send(const void *message, int size, int flags) {
 		ntohs(target_address.sin_port));
 #endif
 	int sendto_result;
-	while ((sendto_result = sendto(sock, message, size, 0,
-			(struct sockaddr *)&target_address, sizeof(target_address))) == -1 &&
-			errno == ENOBUFS) {
-		SDEBUG("ENOBUFS error occurred\n");
-		usleep(1000); // FIXME: use poll or smth else her
-	}
+	do {
+		sendto_result = sendto(sock, message, size, 0,
+			(struct sockaddr *)&target_address, sizeof(target_address));
+#ifndef NDEBUG
+		if (sendto_result == -1 && errno == ENOBUFS) {
+			SDEBUG("ENOBUFS error occurred\n");
+		}
+#endif
+	} while (sendto_result == -1 && errno == ENOBUFS);
 	if (sendto_result < 0) {
 		ERROR("sendto returned: %s\n", strerror(errno));
 		abort(); // FIXME: figure out something in this case
@@ -319,8 +392,8 @@ void MulticastSender::udp_send(const void *message, int size, int flags) {
 }
 
 // A helper fuction which reliably sends message to the multicast connection
-void MulticastSender::mcast_send(const void *message,
-		int size, int flags) {
+void MulticastSender::mcast_send(const void *message, int size)
+{
 #ifndef NDEBUG
 	char dst_addr[INET_ADDRSTRLEN];
 	DEBUG("Send %d bytes to %s:%d\n", size,
@@ -336,45 +409,28 @@ void MulticastSender::mcast_send(const void *message,
 	if (next_responder < targets.size()) {
 		mmh->set_responder(targets[next_responder].addr);
 	} else {
-		mmh->set_responder(MULTICAST_UNEXISTING_RESPONDER);
+		mmh->set_responder(INADDR_NONE);
 	}
-	next_responder = (next_responder + 1) % (targets.size() +
-		2/* FIXME: definitely not 2 */);
+	// TODO: add some percentage of unacknowledged packets depending
+	// on the window size
+	next_responder = (next_responder + 1) % targets.size();
 
 	// Store message for the possibility of the future retransmissions.
 	// (can block)
-	struct timeval current_time;
-	gettimeofday(&current_time, NULL);
-	struct timespec next_retrans_time;
-	TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-	unsigned from_position = 0;
-	while (send_queue->store_message(message, size, &next_retrans_time) !=
-			0) {
-		size_t size;
-		void *message = send_queue->get_unacknowledged_message(&size,
-			&from_position);
-		if (message != NULL) {
-			DEBUG("Retransmit message %u\n",
-				((MulticastMessageHeader *)message)->get_number());
-			udp_send(message, size, flags);
-		} else {
-			// All the retransmissions done, wait for the replies, than restart
-			// the retransmissions
-			gettimeofday(&current_time, NULL);
-			TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-			// FIXME: use a constant here 
-			next_retrans_time.tv_nsec += 200000000;
-			if (next_retrans_time.tv_nsec >= 1000000000) {
-				next_retrans_time.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
-				next_retrans_time.tv_sec += 1;
-			}
-		}
+	void *retrans_message;
+	size_t retrans_message_size;
+	while ((retrans_message = send_queue->store_message(message, size,
+			&retrans_message_size)) != NULL) {
+		ERROR("Retransmit message %u\n",
+			((MulticastMessageHeader *)retrans_message)->get_number());
+		udp_send(retrans_message, retrans_message_size, 0);
 	}
-	udp_send(message, size, flags);
+	udp_send(message, size, 0);
 }
 
 // Sends file through the multicast connection 
-void MulticastSender::send_file() {
+void MulticastSender::send_file()
+{
 #ifndef NDEBUG
 	int total = 0;
 #endif
@@ -390,7 +446,7 @@ void MulticastSender::send_file() {
 		MulticastMessageHeader *mmh =
 			new(message)MulticastMessageHeader(MULTICAST_FILE_DATA, session_id);
 		memcpy(mmh + 1, pointer(), count);
-		mcast_send(message, sizeof(MulticastMessageHeader) + count, 0);
+		mcast_send(message, sizeof(MulticastMessageHeader) + count);
 #ifndef NDEBUG
 		total += count;
 #endif
@@ -410,11 +466,12 @@ void MulticastSender::send_file() {
 	This is the main routine of the multicast sender. It sends
 	files and directories to destinations.
 */
-int MulticastSender::session() {
+int MulticastSender::session()
+{
 	int error;
 	pthread_t routine;
-	if ((error = pthread_create(&routine, NULL, multicast_delivery_thread,
-			this)) != 0) {
+	error = pthread_create(&routine, NULL, multicast_delivery_thread, this);
+	if (error != 0) {
 		ERROR("Can't create a new thread: %s\n", strerror(error));
 		// TODO: Set the error here
 		return -1;
@@ -452,7 +509,7 @@ int MulticastSender::session() {
 		}
 		if (t_curr + length >= t_end) {
 			// Send the message
-			mcast_send(targets_message, t_curr - targets_message, 0);
+			mcast_send(targets_message, t_curr - targets_message);
 			t_curr = (uint8_t *)(nsources_p + 1);
 		}
 		DestinationHeader *h = new(t_curr)
@@ -466,7 +523,7 @@ int MulticastSender::session() {
 		t_curr += fname_length;
 	}
 	if (t_curr != (uint8_t *)(nsources_p + 1)) {
-		mcast_send(targets_message, t_curr - targets_message, 0);
+		mcast_send(targets_message, t_curr - targets_message);
 	}
 	SDEBUG("Destinations sent\n");
 
@@ -479,15 +536,19 @@ int MulticastSender::session() {
 				// Send the MULTICAST_TERMINATION_REQUEST message
 				size_t size;
 				void *message = send_queue->prepare_termination(&size, session_id);
-				mcast_send(message, size, 0);
+				mcast_send(message, size);
 
-#define MAX_NUMBER_OF_TERMINATION_RETRANS 6
-				int retrans_number = 1;
+				unsigned retrans_number = 1;
 				struct timeval current_time;
 				gettimeofday(&current_time, NULL);
 				struct timespec next_retrans_time;
 				TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-				next_retrans_time.tv_nsec += TERMINATE_RETRANSMISSION_RATE;
+				unsigned max_rtt = send_queue->get_max_round_trip_time();
+				if (max_rtt > 0) {
+					next_retrans_time.tv_nsec += max_rtt;
+				} else {
+					next_retrans_time.tv_nsec += DEFAULT_TERMINATE_RETRANSMISSION_RATE;
+				}
 				if (next_retrans_time.tv_nsec >= 1000000000) {
 					next_retrans_time.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
 					next_retrans_time.tv_sec += 1;
@@ -501,7 +562,12 @@ int MulticastSender::session() {
 
 					gettimeofday(&current_time, NULL);
 					TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-					next_retrans_time.tv_nsec += TERMINATE_RETRANSMISSION_RATE;
+					max_rtt = send_queue->get_max_round_trip_time();
+					if (max_rtt > 0) {
+						next_retrans_time.tv_nsec += max_rtt;
+					} else {
+						next_retrans_time.tv_nsec += DEFAULT_TERMINATE_RETRANSMISSION_RATE;
+					}
 					if (next_retrans_time.tv_nsec >= 1000000000) {
 						next_retrans_time.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
 						next_retrans_time.tv_sec += 1;
@@ -528,19 +594,15 @@ int MulticastSender::session() {
 					session_id);
 				FileInfoHeader *file_h = (FileInfoHeader *)(mm_h + 1);
 				*file_h = op->fileinfo;
-#ifndef NDEBUG
-				SDEBUG("fileinfo: ");
-				file_h->print();
-#endif
-				memcpy(file_h + 1, op->filename.c_str(),
-					op->fileinfo.get_name_length());
-				mcast_send(file_record, sizeof(file_record), 0);
-				// TODO: send the dirname in this messsage (for possibility of
-				// delayed retransmission or wait for some condition after the
-				// if block
+				DEBUG("Fileinfo: |%u| %o | %u / %u  |\n", file_h->get_type(),
+				 	file_h->get_mode(), file_h->get_name_length(),
+					file_h->get_name_offset());
+				memcpy(file_h + 1, op->get_filename(), op->fileinfo.get_name_length());
+				mcast_send(file_record, sizeof(file_record));
 
 				if (op->fileinfo.get_type() == resource_is_a_file) {
-					DEBUG("Send file: %s\n", op->filename.c_str());
+					DEBUG("Send file: %s\n",
+						op->get_filename() + op->fileinfo.get_name_offset());
 					// Send the file
 					send_file();
 					// Send the file trailing record
@@ -555,7 +617,7 @@ int MulticastSender::session() {
 						new(file_trailing)MulticastMessageHeader(MULTICAST_FILE_TRAILING,
 						session_id);
 					memcpy(mmh + 1, checksum()->signature, sizeof(checksum()->signature));
-					mcast_send(file_trailing, sizeof(file_trailing), 0);
+					mcast_send(file_trailing, sizeof(file_trailing));
 				}
 			}
 			submit_task();

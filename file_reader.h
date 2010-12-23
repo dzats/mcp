@@ -12,7 +12,9 @@
 class BrokenInputException : public std::exception {};
 
 // class that reads sources from disk or from the unicast network connection
-class FileReader : public Reader {
+class FileReader : public Reader
+{
+	static const int MAX_DATA_RETRANSMISSIONS = 3;
 
 	// Prohibit coping for objects of this class
 	FileReader(const FileReader&);
@@ -25,10 +27,19 @@ public:
 		on suceess and something else otherwise (error can be
 		detected by the distributor's state).
 	*/
-	int read_sources(char **filenames);
+	int read_sources(char **filenames, int *filename_offsets);
 
 	FileReader() {}
 private:
+	// Reads the file 'filename' and pass it to the distributor
+	// Returns 0 on success and -1 otherwise
+
+	int handle_file(const char *filename, struct stat *statp,
+			int basename_offset, bool error_if_cant_open);
+
+	// Reads data from fd (till the end of file) and passes it to
+	// the distributor. Returns 0 on success and errno on failure.
+	int read_from_file(int fd, off_t size);
 
 	// Reads information about the directory 'dirname' and pass it to
 	// the distributor
