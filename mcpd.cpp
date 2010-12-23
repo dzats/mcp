@@ -695,7 +695,6 @@ int main(int argc, char **argv)
         DEBUG("Ephemeral address: %s\n",
           inet_ntop(AF_INET, &e_addr, ephemeral_address,
           sizeof(ephemeral_address)));
-        ephemeral_addr = ntohl(ephemeral_addr);
 #endif
 
         uint16_t ephemeral_port = ntohs(multicast_sender_addr.sin_port);
