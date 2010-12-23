@@ -460,7 +460,7 @@ MulticastSender *MulticastSender::create_and_initialize(
           if (nonlocal_destination != INADDR_NONE) {
             char dest_name[INET_ADDRSTRLEN];
             uint32_t dest_addr = ntohl(nonlocal_destination);
-            ERROR("Destination %s is not link-local\n",
+            ERROR("Destination %s is not link-local. Try to use -g option.\n",
               inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
             return NULL;
           }
@@ -470,6 +470,14 @@ MulticastSender *MulticastSender::create_and_initialize(
           DEBUG("Destination %s is link-local\n",
             inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
 #endif
+          if (is_multicast_only &&
+              local_addresses[i] == all_destinations[j].addr) {
+            char dest_name[INET_ADDRSTRLEN];
+            uint32_t dest_addr = ntohl(all_destinations[j].addr);
+            ERROR("Can't use multicast transfer for local destination: %s\n",
+              inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+            return NULL;
+          }
           local_destinations.push_back(all_destinations[j]);
         } else if (is_multicast_only) {
           if (local_destinations.size() == 0) {
@@ -477,7 +485,7 @@ MulticastSender *MulticastSender::create_and_initialize(
           } else {
             char dest_name[INET_ADDRSTRLEN];
             uint32_t dest_addr = ntohl(all_destinations[j].addr);
-            ERROR("Destination %s is not link-local\n",
+            ERROR("Destination %s is not link-local. Try to use -g option.\n",
               inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
             return NULL;
           }
