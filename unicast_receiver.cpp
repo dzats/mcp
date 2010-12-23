@@ -370,6 +370,7 @@ int UnicastReceiver::session()
       status = finish_task();
       // Send errors to the source
       if (status != STATUS_OK) {
+        DEBUG("Some destinations finished with errors (%d)\n", status);
         errors.send_first(sock);
         if (status >= STATUS_FIRST_FATAL_ERROR) {
           errors.send(sock);
@@ -381,6 +382,7 @@ int UnicastReceiver::session()
       DEBUG("Network error during transmission: %s\n", e.what());
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Network error during transmission: %s\n", e.what());
+      errors.send(sock);
       return EXIT_FAILURE;
     }
   }

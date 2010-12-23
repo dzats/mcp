@@ -417,16 +417,20 @@ int UnicastSender::session()
       // FIXME: rewrite this (errors can come from both directions)
       char *reply_message;
       ReplyHeader h;
-      h.recv_reply(sock, &reply_message, 0);
-      if (h.get_status() >= STATUS_FIRST_FATAL_ERROR) {
+      do {
+        h.recv_reply(sock, &reply_message, 0);
         reader->errors.add(new Reader::SimpleError(h.get_status(),
           h.get_address(), reply_message, strlen(reply_message)));
-        reader->unicast_sender.status = h.get_status();
-        submit_task();
-        close(sock);
-        sock = -1;
-        return -1;
-      }
+        if (reader->unicast_sender.status < h.get_status()) {
+          reader->unicast_sender.status = h.get_status();
+        }
+        if (reader->unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+          submit_task();
+          close(sock);
+          sock = -1;
+          return -1;
+        }
+      } while (h.get_status() != STATUS_OK);
     } catch(std::exception& e) {
       // Can't receive an error, generate it
     }
