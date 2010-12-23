@@ -175,7 +175,8 @@ void sigchld_handler(int signum)
 
     // It is wrong to call printf here
     DEBUG("Child %d picked up\n", pid);
-    DEBUG("Number of active connections: %u.\n", n_connections);
+    DEBUG("Number of active connections: %lu.\n",
+        (unsigned long)n_connections);
   };
 }
 
@@ -191,9 +192,9 @@ void sigusr1_sigaction(int signum, siginfo_t *info, void *uap)
     --n_connections;
   }
 
- // It is wrong to call printf here
- DEBUG("Signal %u from %u received.\n", signum, info->si_pid);
- DEBUG("Number of active connections: %u.\n", n_connections);
+  // It is wrong to call printf here
+  DEBUG("Signal %u from %u received.\n", signum, info->si_pid);
+  DEBUG("Number of active connections: %lu.\n", (unsigned long)n_connections);
 }
 
 // Send a UDP datagram
@@ -740,8 +741,8 @@ int main(int argc, char **argv)
         vector<uint32_t> matches;
         uint32_t local_address = 0;
         for(unsigned i = 0; i < addresses.size(); ++i) {
-          for (unsigned j = 0; j < (len - sizeof(MulticastMessageHeader)) /
-              sizeof(MulticastHostRecord); ++j) {
+          for (unsigned j = 0; j < (len - sizeof(MulticastMessageHeader) -
+              sizeof(MulticastInitData)) / sizeof(MulticastHostRecord); ++j) {
             if (hr[j].get_addr() == addresses[i]) {
               matches.push_back(hr[j].get_addr());
               if (local_address == 0) {
