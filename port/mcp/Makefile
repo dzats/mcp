@@ -1,5 +1,5 @@
 PORTNAME= mcp
-PORTVERSION= 0.3
+PORTVERSION= 0.4
 CATEGORIES= net
 MASTER_SITES= ftp://mirror.rambler.ru/uploads/
 
