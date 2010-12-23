@@ -404,6 +404,8 @@ MulticastSender *MulticastSender::create_and_initialize(
     const vector<Destination> **remaining_dst,
     uint32_t n_sources,
     bool is_multicast_only,
+    bool use_global_multicast,
+    uint32_t multicast_interface,
     Reader *reader,
     Mode mode,
     uint16_t multicast_port,
@@ -412,115 +414,165 @@ MulticastSender *MulticastSender::create_and_initialize(
 {
   MulticastSender *multicast_sender = NULL;
   *remaining_dst = NULL;
-  vector<uint32_t> local_addresses;
-  vector<uint32_t> masks;
-  // Get the local ip addresses and network masks for them
-  int temporary_sock;
-  temporary_sock = socket(PF_INET, SOCK_DGRAM, 0);
-  if (temporary_sock == -1) {
-    ERROR("Can't create a UDP socket: %s\n", strerror(errno));
-    return NULL;
-  }
-  if (get_local_addresses(temporary_sock, &local_addresses, &masks) != 0) {
+  if (!use_global_multicast) {
+    vector<uint32_t> local_addresses;
+    vector<uint32_t> masks;
+    // Get the local ip addresses and network masks for them
+    int temporary_sock;
+    temporary_sock = socket(PF_INET, SOCK_DGRAM, 0);
+    if (temporary_sock == -1) {
+      ERROR("Can't create a UDP socket: %s\n", strerror(errno));
+      return NULL;
+    }
+    if (get_local_addresses(temporary_sock, &local_addresses, &masks) != 0) {
+      close(temporary_sock);
+      return NULL;
+    }
     close(temporary_sock);
-    return NULL;
-  }
-  close(temporary_sock);
-  // Figure out which interface should be used for multicast connections
-  for (unsigned i = 0; i < local_addresses.size(); ++i) {
+    // Figure out which interface should be used for multicast connections
+    for (unsigned i = 0; i < local_addresses.size(); ++i) {
 #ifndef NDEBUG
-    char saddr[INET_ADDRSTRLEN];
-    char smask[INET_ADDRSTRLEN];
-    uint32_t addr = htonl(local_addresses[i]);
-    uint32_t mask = htonl(masks[i]);
-    DEBUG("Address: %s (%s)\n", 
-      inet_ntop(AF_INET, &addr, saddr, sizeof(saddr)),
-      inet_ntop(AF_INET, &mask, smask, sizeof(smask)));
+      char saddr[INET_ADDRSTRLEN];
+      char smask[INET_ADDRSTRLEN];
+      uint32_t addr = htonl(local_addresses[i]);
+      uint32_t mask = htonl(masks[i]);
+      DEBUG("Address: %s (%s)\n", 
+        inet_ntop(AF_INET, &addr, saddr, sizeof(saddr)),
+        inet_ntop(AF_INET, &mask, smask, sizeof(smask)));
 #endif
-    vector<Destination> local_destinations;
-    uint32_t nonlocal_destination = INADDR_NONE;
-    for (unsigned j = 0; j < all_destinations.size(); ++j) {
-      if ((local_addresses[i] & masks[i]) ==
-          (all_destinations[j].addr & masks[i])) {
-        if (nonlocal_destination != INADDR_NONE) {
-          char dest_name[INET_ADDRSTRLEN];
-          uint32_t dest_addr = ntohl(nonlocal_destination);
-          ERROR("Destination %s is not link-local\n",
-            inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
-          return NULL;
-        }
+      vector<Destination> local_destinations;
+      uint32_t nonlocal_destination = INADDR_NONE;
+      for (unsigned j = 0; j < all_destinations.size(); ++j) {
+        if ((local_addresses[i] & masks[i]) ==
+            (all_destinations[j].addr & masks[i])) {
+          if (nonlocal_destination != INADDR_NONE) {
+            char dest_name[INET_ADDRSTRLEN];
+            uint32_t dest_addr = ntohl(nonlocal_destination);
+            ERROR("Destination %s is not link-local\n",
+              inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+            return NULL;
+          }
 #ifndef NDEBUG
-        char dest_name[INET_ADDRSTRLEN];
-        uint32_t dest_addr = ntohl(all_destinations[j].addr);
-        DEBUG("Destination %s is link-local\n",
-          inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
-#endif
-        local_destinations.push_back(all_destinations[j]);
-      } else if (is_multicast_only) {
-        if (local_destinations.size() == 0) {
-          nonlocal_destination = all_destinations[j].addr;
-        } else {
           char dest_name[INET_ADDRSTRLEN];
           uint32_t dest_addr = ntohl(all_destinations[j].addr);
-          ERROR("Destination %s is not link-local\n",
+          DEBUG("Destination %s is link-local\n",
             inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+#endif
+          local_destinations.push_back(all_destinations[j]);
+        } else if (is_multicast_only) {
+          if (local_destinations.size() == 0) {
+            nonlocal_destination = all_destinations[j].addr;
+          } else {
+            char dest_name[INET_ADDRSTRLEN];
+            uint32_t dest_addr = ntohl(all_destinations[j].addr);
+            ERROR("Destination %s is not link-local\n",
+              inet_ntop(AF_INET, &dest_addr, dest_name, sizeof(dest_name)));
+            return NULL;
+          }
+        }
+      }
+#ifdef NDEBUG
+      if (local_destinations.size() > 2 ||
+          local_destinations.size() > 0 && is_multicast_only)
+#else
+      if (local_destinations.size() > 0)
+#endif
+      {
+        multicast_sender = new MulticastSender(reader,
+          mode, multicast_port, n_sources, n_retransmissions, bandwidth);
+        // Establish the multicast session
+        const vector<Destination> *si_result;
+        si_result = multicast_sender->session_init(local_addresses[i],
+          local_destinations, n_sources);
+        if (si_result == NULL) {
+          // A fatal error occurred
+          delete multicast_sender;
           return NULL;
+        } else if (si_result->size() == 0) {
+          // No connection has been established
+          delete multicast_sender;
+          continue;
+        } else {
+          // Multicast connection has been established with some hosts
+          // TODO: close the connection here if there are not many such
+          // hosts
+          vector<Destination> *new_dst = new vector<Destination>;
+          if (si_result->size() > 0) {
+            DEBUG("%zu hosts connected:\n",
+              si_result->size());
+            for (vector<Destination>::const_iterator i =
+              all_destinations.begin();
+                i != all_destinations.end(); ++i) {
+              vector<Destination>::const_iterator j = lower_bound(
+                si_result->begin(), si_result->end(), *i);
+              if (j == si_result->end() || *j != *i) {
+                new_dst->push_back(*i);
+              }
+#ifndef NDEBUG
+              else {
+                char dest_name[INET_ADDRSTRLEN];
+                uint32_t dest_addr = ntohl((*i).addr);
+                DEBUG("%s\n", inet_ntop(AF_INET, &dest_addr, dest_name,
+                  sizeof(dest_name)));
+              }
+#endif
+            }
+          }
+          // Some packets sent to a newly created multicast group are lost.
+          // Sleep here is to avoid/decrease this.
+          // FIXME: A better approach should be developed
+          usleep(20000);
+          *remaining_dst = new_dst;
+          return multicast_sender;
         }
       }
     }
-#ifdef NDEBUG
-    if (local_destinations.size() > 2 ||
-        local_destinations.size() > 0 && is_multicast_only)
-#else
-    if (local_destinations.size() > 0)
-#endif
-    {
-      multicast_sender = new MulticastSender(reader,
-        mode, multicast_port, n_sources, n_retransmissions, bandwidth);
-      // Establish the multicast session
-      const vector<Destination> *si_result;
-      si_result = multicast_sender->session_init(local_addresses[i],
-        local_destinations, n_sources);
-      if (si_result == NULL) {
-        // A fatal error occurred
-        delete multicast_sender;
-        return NULL;
-      } else if (si_result->size() == 0) {
-        // No connection has been established
-        delete multicast_sender;
-        continue;
-      } else {
-        // Multicast connection has been established with some hosts
-        // TODO: close the connection here if there are not many such
-        // hosts
-        vector<Destination> *new_dst = new vector<Destination>;
-        if (si_result->size() > 0) {
-          DEBUG("%zu hosts connected:\n",
-            si_result->size());
-          for (vector<Destination>::const_iterator i = all_destinations.begin();
-              i != all_destinations.end(); ++i) {
-            vector<Destination>::const_iterator j = lower_bound(
-              si_result->begin(), si_result->end(), *i);
-            if (j == si_result->end() || *j != *i) {
-              new_dst->push_back(*i);
-            }
-#ifndef NDEBUG
-            else {
-              char dest_name[INET_ADDRSTRLEN];
-              uint32_t dest_addr = ntohl((*i).addr);
-              DEBUG("%s\n", inet_ntop(AF_INET, &dest_addr, dest_name,
-                sizeof(dest_name)));
-            }
-#endif
+  } else if (all_destinations.size() > 2 || is_multicast_only) {
+    // Use global multicast
+    multicast_sender = new MulticastSender(reader,
+      mode, multicast_port, n_sources, n_retransmissions, bandwidth);
+    // Establish the multicast session
+    const vector<Destination> *si_result;
+    si_result = multicast_sender->session_init(multicast_interface,
+      all_destinations, n_sources);
+    if (si_result == NULL) {
+      // A fatal error occurred
+      delete multicast_sender;
+      return NULL;
+    } else if (si_result->size() == 0) {
+      // No connection has been established
+      delete multicast_sender;
+      *remaining_dst = &all_destinations;
+      return NULL;
+    } else {
+      // Multicast connection has been established with some hosts
+      vector<Destination> *new_dst = new vector<Destination>;
+      if (si_result->size() > 0) {
+        DEBUG("%zu hosts connected:\n",
+          si_result->size());
+        for (vector<Destination>::const_iterator i = all_destinations.begin();
+            i != all_destinations.end(); ++i) {
+          vector<Destination>::const_iterator j = lower_bound(
+            si_result->begin(), si_result->end(), *i);
+          if (j == si_result->end() || *j != *i) {
+            new_dst->push_back(*i);
           }
+#ifndef NDEBUG
+          else {
+            char dest_name[INET_ADDRSTRLEN];
+            uint32_t dest_addr = ntohl((*i).addr);
+            DEBUG("%s\n", inet_ntop(AF_INET, &dest_addr, dest_name,
+              sizeof(dest_name)));
+          }
+#endif
         }
-        // Some packets sent to a newly created multicast group are lost.
-        // Sleep here is to avoid/decrease this.
-        // FIXME: A better approach should be developed
-        usleep(20000);
-        *remaining_dst = new_dst;
-        return multicast_sender;
       }
+      // Some packets sent to a newly created multicast group are lost.
+      // Sleep here is to avoid/decrease this.
+      // FIXME: A better approach should be developed
+      usleep(20000);
+      *remaining_dst = new_dst;
+      return multicast_sender;
     }
   }
   *remaining_dst = &all_destinations;

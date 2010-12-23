@@ -99,8 +99,10 @@ void usage_and_exit(char *name)
   "\t\tinstead of the default port (" NUMBER_TO_STRING(MULTICAST_PORT) ").\n\n" 
   "\t-c number\n"
   "\t\tSet limit to the maximum number of simultaneous connections.\n\n"
-  "\t-b bytes\n"
-  "\t\tSet limit for the total incoming bandwidth in bytes per second.\n\n"
+  "\t-b value\n"
+  "\t\tSet limit for the total incoming bandwidth (suffix 'm' - \n"
+  "\t\tmegabits/second, suffix 'M' - megabytes/second, \n"
+  "\t\twithout suffix - bytes/second).\n\n"
   "\t-u UID\tChange UID, GID and home directory for the process.\n\n"
   "\t-U\tUnicast only (don't accept multicast connections).\n\n"
   "\t-m\tMulticast only (don't accept unicast connections).\n\n"
@@ -395,17 +397,36 @@ int main(int argc, char **argv)
         break;
       case 'b': // Limit the receiver's bandwidth
         bandwidth = atoi(optarg);
+        for (unsigned i = 0; i < strlen(optarg) - 1; ++i) {
+          if (optarg[i] < '0' || optarg[i] > '9') {
+            ERROR("Incorrect bandwidth: %s\n", optarg);
+            return EXIT_FAILURE;
+          }
+        }
+
+        bandwidth = atoi(optarg);
+        if (optarg[strlen(optarg) - 1] < '0' ||
+            optarg[strlen(optarg) - 1] > '9') {
+          if (optarg[strlen(optarg) - 1] == 'm') {
+            bandwidth *= 131072;
+          } else if (optarg[strlen(optarg) - 1] == 'M') {
+            bandwidth *= 1048576;
+          } else {
+            ERROR("Unknown bandwidth suffix: %c\n", optarg[strlen(optarg) - 1]);
+            return EXIT_FAILURE;
+          }
+        }
+  
         if (bandwidth != 0) {
           // Change the bandwidth's unit of measurement
           uint64_t b = bandwidth;
           b = (b << 20) / 1000000;
           bandwidth = b;
-          DEBUG("Bandwidth is set to %u bytes per 1.048576 seconds\n",
-            bandwidth);
         } else {
-          ERROR("Invalid value of the argument '-b': %s\n", optarg);
-          exit(EXIT_FAILURE);
+          ERROR("Incorrect bandwidth: %s\n", optarg);
+          return EXIT_FAILURE;
         }
+        DEBUG("Bandwidth (in bytes per 1.048576 seconds): %u\n", bandwidth);
         break;
       case 'c': // Limit the maximum number of simultaneous
           // connections allowed
@@ -908,9 +929,14 @@ int main(int argc, char **argv)
           if ((unicast_receiver->flags & UNICAST_ONLY_FLAG) == 0) {
             multicast_sender = MulticastSender::create_and_initialize(
               unicast_receiver->destinations, &remaining_dst,
-              unicast_receiver->n_sources, false, unicast_receiver,
+              unicast_receiver->n_sources,
+              false, // is_multicast_only
+              false, // use_global_multicast
+              INADDR_NONE, // interface for global multicast traffic
+              unicast_receiver,
               MulticastSender::server_mode, multicast_port,
-              0 /* bandwidth */, multicast_sender_number);
+              0 /* bandwidth */,
+              multicast_sender_number);
             ++multicast_sender_number;
             if (remaining_dst == NULL) {
               // Some error occurred during the multicast sender initialization

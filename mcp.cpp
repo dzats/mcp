@@ -12,6 +12,8 @@
 
 #include <sys/socket.h> // for socket
 #include <netinet/in.h>
+#include <net/if.h> // for SIOCGIFADDR
+#include <sys/ioctl.h>
 
 #include <dirent.h> // for opendir
 #include <pthread.h>
@@ -56,12 +58,15 @@ void usage_and_exit(char *name)
   "\t-U\tUnicast only (for all hops).\n\n"
   "\t-u\tUnicast only (for the first hop).\n\n"
   "\t-m\tMulticast only.\n\n"
-  "\t-g\tTry to establish multicast connection with all the destinations,\n"
-  "\t\tNot only the link-local ones\n\n"
+  "\t-g interface\n"
+  "\t\tTry to establish multicast connection with all the destinations,\n"
+  "\t\tnot only the link-local ones. Use the specified interface for\n"
+  "\t\tfor multicast traffic.\n\n"
   "\t-c\tVerify the file checksums twise. The second verification is\n"
   "\t\tperformed on data written to the disk.\n\n"
-  "\t-b bytes\n"
-  "\t\tSet per-sender bandwidth limit (in bytes per second).\n\n"
+  "\t-b value\n"
+  "\t\tSet per-sender bandwidth limit (suffix 'm' - megabits/second,\n"
+  "\t\tsuffix 'M' - megabytes/second, without suffix - bytes/second).\n\n"
   "\t-o\tPreserve the specified order of targets during the pipelined\n"
   "\t\ttransfert.\n");
   exit(EXIT_FAILURE);
@@ -209,7 +214,7 @@ int main(int argc, char **argv)
   bool is_order_preserved = false; // Don't change order of the destinations
   // TODO: implement behavior defined by the following flag
   //bool overwrite_files = true; // Overwrite read-only files
-  bool is_multicast_only = false; // Use only the link-local multicast traffic
+  bool is_multicast_only = false; // Use only the multicast traffic
   bool is_first_hop_unicast_only = false; // Use only the unicast traffic
     // for the first hop
   bool verify_checksums_twise = false; // Verify the file checksums twise
@@ -225,6 +230,9 @@ int main(int argc, char **argv)
   bool is_unicast_only = true; // If it's true, use only the unicast traffic
   flags |= UNICAST_ONLY_FLAG;
 #endif
+  bool use_global_multicast = false; // Don't limit multicast by the local link
+  uint32_t multicast_interface = INADDR_NONE; // Interface that will be used
+    // for global multicast traffic
 
   // Set speed for the pseudo-random numbers
   struct timeval tv;
@@ -233,7 +241,7 @@ int main(int argc, char **argv)
 
   // Parse the command options
   int ch;
-  while ((ch = getopt(argc, argv, "p:P:omUub:ch")) != -1) {
+  while ((ch = getopt(argc, argv, "p:P:omg:Uub:ch")) != -1) {
     switch (ch) {
       case 'p': // Port specified
         if ((unicast_port = atoi(optarg)) == 0) {
@@ -255,10 +263,38 @@ int main(int argc, char **argv)
         is_order_preserved = true;
         flags |= PRESERVE_ORDER_FLAG;
         break;
-      case 'm': // Use only the link-local multicast traffic
+      case 'm': // Use only the multicast traffic
         is_multicast_only = true;
         is_unicast_only = false;
         flags &= ~UNICAST_ONLY_FLAG;
+        break;
+      case 'g': // Don't limit multicast by the local link
+        use_global_multicast = true;
+        // Get address of the specified interface
+        {
+          int sock = socket(AF_INET, SOCK_STREAM, 0);
+          if (sock < 0) {
+            ERROR("Can't create a TCP socket: %s\n", strerror(errno));
+            return EXIT_FAILURE;
+          }
+          struct ifreq ifr;
+          strncpy(ifr.ifr_name, optarg, IFNAMSIZ);
+          ifr.ifr_addr.sa_family = AF_INET;
+          if (ioctl(sock, SIOCGIFADDR, &ifr) < 0) {
+            ERROR("Can't get ip address of the interface %s: %s\n",
+              optarg, strerror(errno));
+            return EXIT_FAILURE;
+          }
+          multicast_interface =
+            ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr;
+#ifndef NDEBUG
+          char mi_addr[INET_ADDRSTRLEN];
+          DEBUG("Multicast interface: %s\n",
+            inet_ntop(AF_INET, &multicast_interface, mi_addr, sizeof(mi_addr)));
+#endif
+          multicast_interface = ntohl(multicast_interface);
+          close(sock);
+        }
         break;
       case 'U': // Use only the unicast traffic
         is_unicast_only = true;
@@ -269,7 +305,26 @@ int main(int argc, char **argv)
         is_first_hop_unicast_only = true;
         break;
       case 'b': // Set per-sender bandwidth
+        for (unsigned i = 0; i < strlen(optarg) - 1; ++i) {
+          if (optarg[i] < '0' || optarg[i] > '9') {
+            ERROR("Incorrect bandwidth: %s\n", optarg);
+            return EXIT_FAILURE;
+          }
+        }
+
         bandwidth = atoi(optarg);
+        if (optarg[strlen(optarg) - 1] < '0' ||
+            optarg[strlen(optarg) - 1] > '9') {
+          if (optarg[strlen(optarg) - 1] == 'm') {
+            bandwidth *= 131072;
+          } else if (optarg[strlen(optarg) - 1] == 'M') {
+            bandwidth *= 1048576;
+          } else {
+            ERROR("Unknown bandwidth suffix: %c\n", optarg[strlen(optarg) - 1]);
+            return EXIT_FAILURE;
+          }
+        }
+  
         if (bandwidth != 0) {
           // Change the bandwidth's unit of measurement
           uint64_t b = bandwidth;
@@ -279,6 +334,7 @@ int main(int argc, char **argv)
           ERROR("Incorrect bandwidth: %s\n", optarg);
           return EXIT_FAILURE;
         }
+        DEBUG("Bandwidth (in bytes per 1.048576 seconds): %u\n", bandwidth);
         break;
       case 'c': // Verify the file checksums twise
         verify_checksums_twise = true;
@@ -437,10 +493,11 @@ int main(int argc, char **argv)
   
     // Initialize the multicast sender
     if (!is_unicast_only && !is_first_hop_unicast_only) {
-      multicast_sender = MulticastSender::create_and_initialize(
-        dst, &remaining_dst, n_sources, is_multicast_only,
-        source_reader, MulticastSender::client_mode, multicast_port,
-        bandwidth, n_retransmissions);
+      multicast_sender = MulticastSender::create_and_initialize(dst,
+        &remaining_dst, n_sources,
+        is_multicast_only, use_global_multicast, multicast_interface,
+        source_reader, MulticastSender::client_mode,
+        multicast_port, bandwidth, n_retransmissions);
       if (remaining_dst == NULL) {
         // Some error occurred during the multicast sender initialization
         SDEBUG("Initialization of the multicast sender failed.\n");

@@ -131,6 +131,8 @@ public:
     const std::vector<Destination> **remaining_dst,
     uint32_t n_sources,
     bool is_multicast_only,
+    bool use_global_multicast,
+    uint32_t multicast_interface,
     Reader *reader,
     Mode mode,
     uint16_t multicast_port,
