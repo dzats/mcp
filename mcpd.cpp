@@ -278,7 +278,7 @@ int main(int argc, char **argv)
   homedir = getenv("HOME");
   if (homedir == NULL) {
     ERROR("Can't get the home directory: %s\n", strerror(errno));
-    homedir = "/";
+    homedir = (char *)"/";
   }
   homedir = strdup(homedir);
 
