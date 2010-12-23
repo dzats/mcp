@@ -344,14 +344,14 @@ void* MulticastSendQueue::get_message_for_retransmission(size_t *size,
 	buffer[offset]->timestamp = (struct timeval){0, 0};
 	ssthresh = max(unacknowledged_data / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
 	// May be excessive condition
-	ERROR("Unacknowledged data: %u (%u)\n", unacknowledged_data, window_size);
+	DEBUG("Unacknowledged data: %u (%u)\n", unacknowledged_data, window_size);
 	if (unacknowledged_data > window_size &&
 			unacknowledged_data <= ssthresh + MAX_UDP_PACKET_SIZE * 3) {
 		pthread_cond_signal(&space_ready_cond);
 	}
 
 	window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
-	ERROR("Packet %u lost, new window size: %u\n", number, window_size);
+	DEBUG("Packet %u lost, new window size: %u\n", number, window_size);
 	pthread_mutex_unlock(&_mutex);
 	return message;
 }

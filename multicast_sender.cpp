@@ -421,7 +421,7 @@ void MulticastSender::mcast_send(const void *message, int size)
 	size_t retrans_message_size;
 	while ((retrans_message = send_queue->store_message(message, size,
 			&retrans_message_size)) != NULL) {
-		ERROR("Retransmit message %u\n",
+		DEBUG("Retransmit message %u\n",
 			((MulticastMessageHeader *)retrans_message)->get_number());
 		udp_send(retrans_message, retrans_message_size, 0);
 	}
