@@ -24,6 +24,30 @@ public:
 			// this object
 		uint8_t status; // status of the last task, see connection.h
 		unsigned offset; // data offet in the distributor's buffer
+
+		// Fields used to store errors
+		uint32_t addr; // Address ot the host, caused the error.
+			// INADDR_NONE means that the error occured on this host
+		char *message; // network message to be sent to the immediate
+			// source in the case of unrecoverable error 
+		uint32_t message_length;
+
+		void set_error(int address, char *msg, uint32_t msg_length) volatile {
+			if (message != NULL) {
+				free(message);
+			}
+			addr = address;
+			message = msg;
+			message_length = msg_length;
+		}
+
+		Client() : is_present(false), is_done(true), status(STATUS_OK),
+			offset(0), message(NULL) {}
+		~Client() {
+			if (message != NULL) {
+				free(message);
+			}
+		}
 	};
 
 	class Writer;
@@ -141,7 +165,7 @@ private:
 
 	// It is almost equivalent to add_task(operation with empty fileinfo), finish
 	// task
-	void finish_work();
+	uint8_t finish_work();
 
 	// Put data into the buffer
 	void put_data(void *data, int size);
@@ -160,6 +184,13 @@ public:
 		pthread_cond_destroy(&space_ready_cond);
 		pthread_mutex_destroy(&_mutex);
 	}
+
+	// Displays the fatal error registered by the writers (unicast sender
+	// and multicast sender or by the reader
+	void display_error();
+
+	// Sends the occurred error to the imediate source
+	void send_fatal_error(int sock);
 
 	friend class Reader;
 };
@@ -189,6 +220,12 @@ protected:
 	void submit_task() {
 		pthread_mutex_lock(&buff->_mutex);
 		w->is_done = true;
+		if (w->status != STATUS_OK) {
+			pthread_cond_signal(&buff->space_ready_cond);
+		}
+		if (w == &buff->file_writer) {
+			pthread_cond_signal(&buff->filewriter_done_cond);
+		}
 		if (buff->all_writers_done()) {
 			pthread_cond_signal(&buff->writers_finished_cond);
 		}
@@ -203,8 +240,9 @@ protected:
 	// Checksum of the last file received
 	MD5sum* checksum() { return &buff->checksum; }
 
-	// Writes data from buffer to 'fd'
-	void write_to_file(int fd);
+	// Writes data from the distributor to fd. Returns 0 on success or
+	// errno of the last write call on failure
+	int write_to_file(int fd);
 };
 
 /*

@@ -1,4 +1,4 @@
-COMMON_OBJECTS = md5.o reader.o unicast_sender.o file_writer.o distributor.o
+COMMON_OBJECTS = md5.o reader.o unicast_sender.o file_writer.o distributor.o connection.o
 UNCOMMON_OBJECTS = mcp.o mcpd.o
 
 DEP_FILES = $(COMMON_OBJECTS:.o=.d) $(UNCOMMON_OBJECTS:.o=.d)

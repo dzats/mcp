@@ -58,8 +58,8 @@ void *unicast_sender_routine(void *args) {
 	UnicastSender *unicast_sender = (UnicastSender *)args;
 	int retval;
 	if ((retval = unicast_sender->session()) != 0) {
-		fprintf(stderr, "Transmission failed, status: %d\n", retval);
-		abort();
+		// FIXME: print some information here
+		ERROR("Transmission failed, status: %d\n", retval);
 	}
 
 	SDEBUG("Unicast sender thread finished\n");
@@ -103,13 +103,13 @@ int main(int argc, char **argv) {
 		switch (ch) {
 			case 'a': // Address specified
 				if ((address = inet_addr(optarg)) == INADDR_NONE) {
-					fprintf(stderr, "Invalid address: %s\n", optarg);
+					ERROR("Invalid address: %s\n", optarg);
 					exit(EXIT_FAILURE);
 				}
 				break;
 			case 'p': // Port specified
 				if ((port = atoi(optarg)) == 0) {
-					fprintf(stderr, "Invalid port: %s\n", optarg);
+					ERROR("Invalid port: %s\n", optarg);
 					exit(EXIT_FAILURE);
 				}
 				break;
@@ -127,7 +127,8 @@ int main(int argc, char **argv) {
 
 	int on = 1;
 	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0) {
-		ERROR("Can't set the SO_REUSEADDR socket option: %s\n", strerror(errno));
+		ERROR("Can't set the SO_REUSEADDR socket option: %s\n",
+			strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 
@@ -136,7 +137,8 @@ int main(int argc, char **argv) {
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr.s_addr = address;
 	server_addr.sin_port = htons(port);
-	if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
+	if (bind(sock, (struct sockaddr *)&server_addr,
+			sizeof(server_addr)) != 0) {
 		perror("Can't bind the socket");
 		exit(EXIT_FAILURE);
 	}
@@ -175,41 +177,58 @@ int main(int argc, char **argv) {
 			Reader *socket_reader = new Reader(buff);
 			FileWriter *file_writer = new FileWriter(buff); 
 			if (socket_reader->session_init(client_sock) != 0) {
-				printf("Can't get the initial data from the server\n");
+				SERROR("Can't get the initial data from the server\n");
 				exit(EXIT_FAILURE);
 			}
 
 			// TODO: session_init for the multicast sender
 
+			// Run the unicast sender sender
 			if (socket_reader->dst.size() > 0) {
-				// Init the unicast sender
 				usender_started = true;
 				UnicastSender *unicast_sender = new UnicastSender(buff);
 				SDEBUG("Initialize the unicast sender thread\n");
 				int retval;
 				if ((retval = unicast_sender->session_init(socket_reader->dst,
-						socket_reader->nsources)) != 0) {
-					// TODO: report about an error somehow
-					fprintf(stderr, "Session initialization failed: %s\n",
-						strerror(retval));
-					abort();
-				}
-				// Start the unicast sender
-				int error;
-				if ((error = pthread_create(&usender_thread, NULL,
-						unicast_sender_routine, unicast_sender)) != 0) {
-					ERROR("Can't create a new thread: %s\n",
-						strerror(errno));
-					exit(EXIT_FAILURE);
+						socket_reader->nsources)) == 0) {
+					// Start the unicast sender
+					int error;
+					if ((error = pthread_create(&usender_thread, NULL,
+							unicast_sender_routine, unicast_sender)) != 0) {
+						ERROR("Can't create a new thread: %s\n",
+							strerror(errno));
+						exit(EXIT_FAILURE);
+					}
+				} else {
+					// An error occurred during the unicast session initialization.
+					// About this error will be reported later
+					DEBUG("Session initialization failed: %s\n", strerror(retval));
 				}
 			}
 
 			// Conform to the source that the connection established
 			try {
-				send_normal_conformation(client_sock);
+				if (buff->reader.status >= STATUS_FIRST_FATAL_ERROR) {
+					send_error(client_sock, buff->reader.status,
+						buff->reader.addr, buff->reader.message_length,
+						buff->reader.message);
+					exit(EXIT_FAILURE);
+				} else if (buff->unicast_sender.is_present &&
+						buff->unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+					// A fatal error occurred during the unicast sender initialization
+					// FIXME: race condition can take place here.
+					send_error(client_sock, buff->unicast_sender.status,
+						buff->unicast_sender.addr, buff->unicast_sender.message_length,
+						buff->unicast_sender.message);
+					exit(EXIT_FAILURE);
+				} else if (buff->multicast_sender.is_present &&
+						buff->multicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+					// TODO: do the same thing as with other writers
+				}
 			} catch (ConnectionException& e) {
-				// TODO: terminate somehow
-				assert(0);
+				ERROR("Can't send a message to the immediate source: %s\n", e.what());
+				// The TCP connection is broken.  All we can do, it just silently exit.
+				exit(EXIT_FAILURE);
 			}
 
 			// Start the file writer thread
@@ -217,16 +236,14 @@ int main(int argc, char **argv) {
 			int error;
 			if ((error = pthread_create(&fwriter_thread, NULL,
 					file_writer_routine, (void *)file_writer)) != 0) {
-				ERROR("Can't create a new thread: %s\n",
-					strerror(errno));
+				ERROR("Can't create a new thread: %s\n", strerror(errno));
 				exit(EXIT_FAILURE);
 			}
 
 			// Start the main routine (read files and directories and pass them
 			// to the distributor)
 			if (socket_reader->session() != 0) {
-				SERROR("Session terminated\n");
-				exit(EXIT_FAILURE);
+				buff->send_fatal_error(client_sock);
 			}
 
 			pthread_join(fwriter_thread, NULL);

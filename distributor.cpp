@@ -10,28 +10,64 @@
 #include "distributor.h"
 #include "log.h"
 
+// Displays the fatal error registered by the writers (unicast sender
+// and multicast sender or by the reader
+void Distributor::display_error() {
+	if (reader.status >= STATUS_FIRST_FATAL_ERROR) {
+		ERROR("%s\n", reader.message);
+	} else if (unicast_sender.is_present &&
+			unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+		if (unicast_sender.addr != INADDR_NONE) {
+			struct in_addr addr = {unicast_sender.addr};
+			ERROR("from host %s: %s\n", inet_ntoa(addr),
+				unicast_sender.message);
+		} else {
+			ERROR("%s\n", unicast_sender.message);
+		}
+	} else if (multicast_sender.is_present &&
+			multicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+		// TODO: display errors
+	}
+}
+
+// Sends the occurred error to the imediate source
+void Distributor::send_fatal_error(int sock) {
+	try {
+		// Global error occured, send it to the immediate source
+		if (reader.status >= STATUS_FIRST_FATAL_ERROR) {
+			DEBUG("Reader finished with the error: %s\n", reader.message);
+			send_error(sock, reader.status, reader.addr, reader.message_length,
+				reader.message);
+		}
+		else if (unicast_sender.is_present &&
+				unicast_sender.status >= STATUS_FIRST_FATAL_ERROR) {
+			struct in_addr addr = {unicast_sender.addr};
+			DEBUG("Unicast Sender finished with the error: (%s) %s\n",
+				inet_ntoa(addr), unicast_sender.message);
+			send_error(sock, unicast_sender.status,
+				unicast_sender.addr, unicast_sender.message_length,
+				unicast_sender.message);
+		} else if (file_writer.is_present &&
+				file_writer.status >= STATUS_FIRST_FATAL_ERROR) {
+			DEBUG("File writer finished with the error: %s\n", file_writer.message);
+			send_error(sock, file_writer.status, file_writer.addr,
+				file_writer.message_length, file_writer.message);
+		} else {
+			assert(multicast_sender.is_present &&
+				multicast_sender.status >= STATUS_FIRST_FATAL_ERROR);
+			// TODO: Display the multicast error
+			SERROR("multicast error\n");
+		}
+	} catch (ConnectionException& e) {
+		ERROR("Can't send error to the source: %s\n", e.what());
+	}
+}
+
 Distributor::Distributor() : is_reader_awaiting(false),
 		are_writers_awaiting(false) {
-	// Set the buffer to the default state
+	// The reader is always present. FIXME: It may worth to join
+	// the reader and the distributor
 	reader.is_present = true;
-	reader.is_done = true;
-	reader.status = STATUS_OK;
-	reader.offset = 0;
-
-	file_writer.is_present = false;
-	file_writer.is_done = true;
-	file_writer.status = STATUS_OK;
-	file_writer.offset = 0;
-
-	unicast_sender.is_present = false;
-	unicast_sender.is_done = true;
-	unicast_sender.status = STATUS_OK;
-	unicast_sender.offset = 0;
-
-	multicast_sender.is_present = false;
-	multicast_sender.is_done = true;
-	multicast_sender.status = STATUS_OK;
-	multicast_sender.offset = 0;
 
 	buffer = (uint8_t*)malloc(DEFAULT_BUFFER_SIZE);
 	pthread_mutex_init(&_mutex, NULL);
@@ -42,6 +78,7 @@ Distributor::Distributor() : is_reader_awaiting(false),
 	pthread_cond_init(&filewriter_done_cond, NULL);
 }
 
+// Adds a new task to the buffer, block until the previous task finished
 void Distributor::add_task(const TaskHeader& op) {
 	pthread_mutex_lock(&_mutex);
 	operation = op;
@@ -51,21 +88,21 @@ void Distributor::add_task(const TaskHeader& op) {
 	reader.status = STATUS_OK;
 	reader.offset = 0;
 
-	if (file_writer.is_present) {
+	if (file_writer.is_present &&
+			file_writer.status < STATUS_FIRST_FATAL_ERROR) {
 		file_writer.is_done = false;
-		file_writer.status = STATUS_OK;
 		file_writer.offset = 0;
 	}
 
-	if (unicast_sender.is_present) {
+	if (unicast_sender.is_present &&
+			unicast_sender.status < STATUS_FIRST_FATAL_ERROR) {
 		unicast_sender.is_done = false;
-		unicast_sender.status = STATUS_OK;
 		unicast_sender.offset = 0;
 	}
 
-	if (multicast_sender.is_present) {
+	if (multicast_sender.is_present &&
+			multicast_sender.status < STATUS_FIRST_FATAL_ERROR) {
 		multicast_sender.is_done = false;
-		multicast_sender.status = STATUS_OK;
 		multicast_sender.offset = 0;
 	}
 	// Wake up the readers
@@ -73,6 +110,8 @@ void Distributor::add_task(const TaskHeader& op) {
 	pthread_mutex_unlock(&_mutex);
 }
 
+// Signal that the reader has finished the task and wait for the readers
+// Returns class of the most critical error
 uint8_t Distributor::finish_task() {
 	pthread_mutex_lock(&_mutex);
 	reader.is_done = true;
@@ -83,12 +122,12 @@ uint8_t Distributor::finish_task() {
 #endif
 	pthread_cond_broadcast(&data_ready_cond);
 
-	// Wait until the readers accomplish the task
+	// Wait until the writers accomplish the task
 	while (!all_done()) {
 		pthread_cond_wait(&writers_finished_cond, &_mutex);
 	}
 
-	// Get the operation status
+	// Get the task status
 	uint8_t status = reader.status;
 	if (file_writer.status > status) {
 		status = file_writer.status;
@@ -104,38 +143,69 @@ uint8_t Distributor::finish_task() {
 	return status;
 }
 
-void Distributor::finish_work() {
+// It is combination of the add_task for trailing task and finish_task
+uint8_t Distributor::finish_work() {
 	pthread_mutex_lock(&_mutex);
+	// Warning the task must be finished
 	while (!all_done()) {
 		// Wait until the readers accomplish the previous task
 		pthread_cond_wait(&writers_finished_cond, &_mutex);
 	}
+	SDEBUG("Set the trailing task\n");
 	// Move the trailing record to the operation->fileinfo
 	memset(&operation.fileinfo, 0, sizeof(operation.fileinfo));
-	// Set the buffer to the default state, except the reader.is_done
-	if (file_writer.is_present) {
+
+	// Don't wait for the file writer
+	if (file_writer.is_present &&
+			file_writer.status < STATUS_FIRST_FATAL_ERROR) {
 		file_writer.is_done = false;
-		file_writer.status = STATUS_OK;
 		file_writer.offset = 0;
 	}
 
-	if (unicast_sender.is_present) {
+	if (unicast_sender.is_present &&
+			unicast_sender.status < STATUS_FIRST_FATAL_ERROR) {
 		unicast_sender.is_done = false;
-		unicast_sender.status = STATUS_OK;
 		unicast_sender.offset = 0;
 	}
 
-	if (multicast_sender.is_present) {
+	if (multicast_sender.is_present &&
+			multicast_sender.status < STATUS_FIRST_FATAL_ERROR) {
 		multicast_sender.is_done = false;
-		multicast_sender.status = STATUS_OK;
 		multicast_sender.offset = 0;
 	}
 
+	SDEBUG("Wait for the writers\n");
 	// Wake up the writers
 	pthread_cond_broadcast(&operation_ready_cond);
+
+	// Wait until the writers accomplish the task
+	while (!all_done()) {
+		pthread_cond_wait(&writers_finished_cond, &_mutex);
+	}
+
+	// Get the task status
+	uint8_t status = reader.status;
+	if (file_writer.status > status) {
+		status = file_writer.status;
+	}
+	if (unicast_sender.status > status) {
+		status = unicast_sender.status;
+	}
+	if (multicast_sender.status > status) {
+		status = multicast_sender.status;
+	}
+
+	SDEBUG("The finish_work method exited\n");
 	pthread_mutex_unlock(&_mutex);
+	return status;
 }
 
+
+/*
+	Return free space available for read, blocks until
+	the space will be available. Can be called only by the
+	reader.
+*/
 int Distributor::get_data(Client *w) {
 	int count;
 	pthread_mutex_lock(&_mutex);
@@ -145,9 +215,6 @@ int Distributor::get_data(Client *w) {
 #ifdef BUFFER_DEBUG
 			SDEBUG("writer %p is done, wake up reader\n", w);
 #endif
-			if (w == &file_writer) {
-				pthread_cond_signal(&filewriter_done_cond);
-			}
 			pthread_mutex_unlock(&_mutex);
 			return 0;
 		} else {
@@ -167,6 +234,11 @@ int Distributor::get_data(Client *w) {
 	return count;
 }
 
+/*
+	Return free space available for write, blocks until
+	the space will be available. Can be called only by the
+	reader.
+*/
 int Distributor::get_space() {
 	int count;
 	pthread_mutex_lock(&_mutex);
@@ -214,6 +286,8 @@ void Distributor::update_reader_position(int count) {
 	pthread_mutex_unlock(&_mutex);
 }
 
+// Move w->offset to the count bytes left (cyclic)
+// Count should not be greater than zero.
 void Distributor::update_writer_position(int count, Client *w) {
 	pthread_mutex_lock(&_mutex);
 #ifdef BUFFER_DEBUG
@@ -232,6 +306,7 @@ void Distributor::update_writer_position(int count, Client *w) {
 	pthread_mutex_unlock(&_mutex);
 }
 
+// Put data into the buffer
 void Distributor::put_data(void *data, int size) {
 	do {
 		int count = get_space();
@@ -246,6 +321,7 @@ void Distributor::put_data(void *data, int size) {
 	} while (size > 0);
 }
 
+// Put data into the buffer, checksum is not changed
 void Distributor::put_data_without_checksum_update(void *data, int size) {
 	do {
 		int count = get_space();
@@ -258,8 +334,12 @@ void Distributor::put_data_without_checksum_update(void *data, int size) {
 	} while (size > 0);
 }
 
-void Distributor::Writer::write_to_file(int fd) {
+// Writes data from the distributor to fd. Returns 0 on success or
+// errno of the last write call on failure
+int Distributor::Writer::write_to_file(int fd) {
+#ifndef NDEBUG
 	int total = 0;
+#endif
 	int count = get_data();
 	count = std::min(count, 16384); 
 	while (count > 0) {
@@ -267,21 +347,20 @@ void Distributor::Writer::write_to_file(int fd) {
 		DEBUG("Sending %d bytes of data\n", count);
 #endif
 		count = write(fd, pointer(), count);
+#ifndef NDEBUG
 		total += count;
+#endif
 #ifdef BUFFER_DEBUG
 		DEBUG("%d (%d) bytes of data sent\n", count, total);
 #endif
 		if (count > 0) {
 			update_position(count);
 		} else {
-			DEBUG("!!!!!! count == 0, total == %d\n", total);
-			// FIXME: Behavior here should be a bit less cruel
-			perror("Input/Output error 2");
-			exit(EXIT_FAILURE);
+			return errno;
 		}
 		count = get_data();
 		count = std::min(count, 16384);
 	}
 	DEBUG("write_to_file: %d bytes wrote\n", total);
+	return 0;
 }
-

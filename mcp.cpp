@@ -41,9 +41,11 @@ void usage_and_exit() {
 void *source_reader_routine(void *args) {
 	Reader *s = ((Reader::ThreadArgs *)args)->source_reader;
 	char **filenames = ((Reader::ThreadArgs *)args)->filenames;
-	int error;
-	if ((error = s->read_sources(filenames)) != 0) {
-		ERROR("file_reader session error: %d\n", error);
+	try {
+		s->read_sources(filenames);
+	} catch (BrokenInputException& e) {
+		// Signal about an error
+		return (void *)-1;
 	}
 	return NULL;
 }
@@ -202,7 +204,7 @@ int main(int argc, char **argv) {
 		}
 		// Check for the sources' accessability
 		if (access(filenames[i], R_OK) != 0) {
-			ERROR("%s: %s", filenames[i], strerror(errno));
+			ERROR("%s: %s\n", filenames[i], strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -232,7 +234,7 @@ int main(int argc, char **argv) {
 		// FIXME: For portability reasons we should check whether the 
 		// hostname in the dotted dicimal format here.
 		if ((hptr = gethostbyname(hostname)) == NULL) {
-			fprintf(stderr, "Can't get address for the host %s: %s\n", argv[i],
+			ERROR("Can't get address for the host %s: %s\n", argv[i],
 				hstrerror(h_errno));
 			exit(EXIT_FAILURE);
 		}
@@ -296,28 +298,33 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	int retval;
-	if ((retval = unicast_sender->session_init(dst, nsources)) != 0) {
-		// TODO: report about an error somehow
-		fprintf(stderr, "Session initialization failed: %s\n", strerror(retval));
+	// Establish unicast session
+	if (unicast_sender->session_init(dst, nsources) != 0) {
+		pthread_join(source_reader_thread, NULL);
+		buff->display_error();
 		return EXIT_FAILURE;
 	}
-	if ((retval = unicast_sender->session()) != 0) {
-		fprintf(stderr, "Transmission failed: %s\n", strerror(retval));
+
+	// Execute the main routine by the unicast sender
+	if (unicast_sender->session() != 0) {
+		pthread_join(source_reader_thread, NULL);
+		buff->display_error();
 		return EXIT_FAILURE;
 	}
 
 	// Wait for readers
-	pthread_join(source_reader_thread, NULL);
+	void *result;
+	pthread_join(source_reader_thread, &result);
+	if (result != NULL) {
+		buff->display_error();
+	}
 
-	// not necessary
-	SDEBUG("TaskHeader finished, clean up the data\n");
-
+	SDEBUG("Finished, clean up the data\n");
 	delete unicast_sender;
 	delete source_reader;
 	delete buff;
 	for (int i = 0; i < nsources; ++i) {
-		free(*filenames);
+		free(filenames[i]);
 	}
 	free(filenames);
 	return EXIT_SUCCESS;
