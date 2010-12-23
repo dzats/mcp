@@ -186,7 +186,7 @@ bool Distributor::Errors::is_server_busy()
   bool result = false;
   for (list<ErrorMessage*>::const_iterator i = errors.begin();
       i != errors.end(); ++i) {
-    if ((*i)->status != STATUS_SERVER_IS_BUSY) {
+    if ((*i)->status == STATUS_SERVER_IS_BUSY) {
       result = true;
       break;
     }

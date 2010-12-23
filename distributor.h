@@ -351,7 +351,7 @@ public:
   // Wrapper for the Errors.is_server_busy
   bool is_server_busy()
   {
-    return errors.is_unrecoverable_error_occurred();
+    return errors.is_server_busy();
   }
 
   friend class Writer;

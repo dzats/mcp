@@ -648,6 +648,7 @@ int main(int argc, char **argv)
       }
     }
 
+    bool is_server_busy = source_reader->is_server_busy();
     source_reader->delete_recoverable_errors();
     source_reader->display_errors();
     if (source_reader->is_unrecoverable_error_occurred()) {
@@ -673,7 +674,7 @@ int main(int argc, char **argv)
 
     // Restart the client if some of the servers have been busy
     if (is_recoverable_error_occurred) {
-      if (source_reader->is_server_busy()) {
+      if (is_server_busy) {
         DEBUG("Will try to connect again after %u milleseconds\n", 
           1000000 * RECONNECTION_TIMEOUT +
           unsigned((RECONNECTION_TIMEOUT_SPREAD * 1000000) *
