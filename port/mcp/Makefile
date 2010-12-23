@@ -1,7 +1,7 @@
 PORTNAME=	mcp
 PORTVERSION=	0.1
 CATEGORIES=	net
-MASTER_SITES=	http://nonexistinghost.rambler.ru/
+MASTER_SITES=	ftp://mirror.rambler.ru/uploads/
 
 MAINTAINER=	d.zatsepin@rambler-co.ru
 COMMENT=	Network multi-destination file copy tool.
