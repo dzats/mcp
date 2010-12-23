@@ -10,7 +10,6 @@
 #include <sys/mman.h> // for mmap
 #include <sys/socket.h>
 #include <sys/time.h> // for gettimeofday
-#include <sys/limits.h> // for UID_MAX
 #include <fcntl.h>
 #include <poll.h>
 #include <pwd.h>
@@ -297,12 +296,6 @@ void change_user(const char *name)
   } else {
     // The parameter specified as a number
     // Search for GID and home directory in the passwd file
-#ifdef UID_MAX
-    if (n > UID_MAX) {
-      SERROR("UID passed to the -u option is too big\n");
-      exit(EXIT_FAILURE);
-    }
-#endif
     pw = getpwuid(n);
     if (pw == NULL) {
       if (errno != 0) {
