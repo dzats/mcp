@@ -19,6 +19,7 @@ PROJECT( mcp )
   SET(mcp_common_sources
     connection.cpp
     distributor.cpp
+    errors.cpp
     md5.cpp
     reader.cpp
     multicast_send_queue.cpp
