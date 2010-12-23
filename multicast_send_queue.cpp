@@ -15,10 +15,10 @@ using namespace std;
 MulticastSendQueue::MulticastSendQueue(const vector<Destination> targets,
     unsigned *rtts, bool use_fixed_rate_multicast) :
     store_position(0), data_on_flow(0),
-    window_size(INITIAL_WINDOW_SIZE), ssthresh(UINT_MAX),
-    last_packet_caused_congestion(UINT32_MAX),
-    is_queue_full(false), is_fatal_error_occurred(false),
-    use_fixed_rate(use_fixed_rate_multicast)
+    use_fixed_rate(use_fixed_rate_multicast),
+    window_size(INITIAL_WINDOW_SIZE),
+    ssthresh(UINT_MAX), last_packet_caused_congestion(UINT32_MAX),
+    is_queue_full(false), is_fatal_error_occurred(false)
 {
   n_destinations = targets.size();
   buffer = std::deque<MessageRecord*>(max(n_destinations * DEFAULT_BUFFER_SCALE,
