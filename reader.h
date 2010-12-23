@@ -13,16 +13,16 @@
 class Reader : public Distributor
 {
 public:
-	static const int MAX_ERROR_MESSAGE_SIZE = MAXPATHLEN + 160;
+  static const int MAX_ERROR_MESSAGE_SIZE = MAXPATHLEN + 160;
 protected:
-	Reader() {}
+  Reader() {}
 
-	// Registers an error and finish the current task
-	void register_error(uint8_t status, const char *fmt, ...);
+  // Registers an error and finish the current task
+  void register_error(uint8_t status, const char *fmt, ...);
 
 private:
-	// Prohibit coping for objects of this class
-	Reader(const Reader&);
-	Reader& operator=(const Reader&);
+  // Prohibit coping for objects of this class
+  Reader(const Reader&);
+  Reader& operator=(const Reader&);
 };
 #endif

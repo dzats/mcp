@@ -26,21 +26,21 @@
 
 class MD5sum
 {
-	struct MD5Context
-	{
+  struct MD5Context
+  {
     uint32_t buf[4];
     uint32_t bits[2];
     unsigned char in[64];
-	};
-	struct MD5Context ctx;
-	void transform(uint32_t buf[4], uint32_t in[16]);
+  };
+  struct MD5Context ctx;
+  void transform(uint32_t buf[4], uint32_t in[16]);
 public:
-	unsigned char signature[16];
-	static void display_signature(FILE *stream,
-		const unsigned char *signature);
-	MD5sum();
-	void update(void *buff, unsigned len);
-	void final();
+  unsigned char signature[16];
+  static void display_signature(FILE *stream,
+    const unsigned char *signature);
+  MD5sum();
+  void update(void *buff, unsigned len);
+  void final();
 };
 
 
