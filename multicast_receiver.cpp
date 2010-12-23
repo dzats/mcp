@@ -687,7 +687,6 @@ int MulticastReceiver::session()
                 strerror(error));
               register_error(STATUS_NOT_FATAL_DISK_ERROR,
                 "Can't open the file %s: %s", target_name, strerror(error));
-              free_targetfile_name(target_name, path_type);
             }
             free_targetfile_name(target_name, path_type);
           } else {
