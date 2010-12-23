@@ -296,7 +296,7 @@ void MulticastReceiver::read_messages()
       sizeof(mreq)) != 0) {
     char t_addr[INET_ADDRSTRLEN];
     char t_maddr[INET_ADDRSTRLEN];
-    ERROR("Can't join the multicast group %s on %s: %s",
+    ERROR("Can't join the multicast group %s on %s: %s\n",
       inet_ntop(AF_INET, &maddr.s_addr, t_maddr, sizeof(t_maddr)),
       inet_ntop(AF_INET, &mreq.imr_interface.s_addr, t_addr, sizeof(t_addr)),
       strerror(errno));
@@ -566,13 +566,14 @@ void MulticastReceiver::read_messages()
 #endif
           // FIXME: check the message type here
           // Reply to the message if required
-          if (mmh->get_responder() == local_address) {
 #ifdef DETAILED_MULTICAST_DEBUG
             SDEBUG("Packet destinated to this host\n");
 #endif
-            if (missed_packets.size() == 0 ||
-                cyclic_greater(*missed_packets.begin(), message_number)) {
-              // No packets've been lost, send the reply
+          if (missed_packets.size() == 0 ||
+              cyclic_greater(*missed_packets.begin(), message_number)) {
+            // No packets've been lost
+            if (mmh->get_responder() == local_address) {
+              // Send a reply to the sender
               int send_reply_result = send_reply(message_number);
               if (send_reply_result != 0) {
                 ERROR("Can't send a UDP reply: %s\n",
@@ -580,43 +581,21 @@ void MulticastReceiver::read_messages()
                 message_queue.set_fatal_error();
                 pthread_exit(NULL);
               }
-            } else {
-              // Some packets are lost, send information about this
-              // if it has not been send in reply to some previous
-              // packet.
-              if (!is_missed_sent) {
-                int result = send_missed_packets(message_number);
-                if (result != 0) {
-                  ERROR("Can't send information about missed packets: %s\n",
-                    strerror(result));
-                  message_queue.set_fatal_error();
-                  pthread_exit(NULL);
-                }
-                is_missed_sent = true;
-                previous_retrans = message_number;
-#if 0
-              } else {
-                SDEBUG("Send empty retransmission request to correct RTT "
-                  "calculation\n");
-                // Send information that some packets have been missed,
-                // but don't send numbers of than packets to avoid ACK
-                // flooding. FIXME: It is not the best choise.
-                uint8_t message[sizeof(MulticastMessageHeader)];
-                MulticastMessageHeader *mmh = new(message)
-                  MulticastMessageHeader(MULTICAST_MESSAGE_RETRANS_REQUEST,
-                  session_id);
-                mmh->set_number(message_number);
-                mmh->set_responder(local_address);
-                int send_datagram_result = send_datagram(message,
-                  sizeof(message));
-                if (send_datagram_result != 0) {
-                  ERROR("Can't send a UDP reply: %s\n",
-                    strerror(send_datagram_result));
-                  message_queue.set_fatal_error();
-                  pthread_exit(NULL);
-                }
-#endif
+            }
+          } else {
+            // Some packets are lost, send information about this
+            // if it has not been send in a reply to some previous
+            // packet.
+            if (!is_missed_sent) {
+              int result = send_missed_packets(message_number);
+              if (result != 0) {
+                ERROR("Can't send information about missed packets: %s\n",
+                  strerror(result));
+                message_queue.set_fatal_error();
+                pthread_exit(NULL);
               }
+              is_missed_sent = true;
+              previous_retrans = message_number;
             }
           }
       }

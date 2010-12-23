@@ -135,7 +135,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
   }
 
   if (message_to_send == message &&
-      store_position > n_destinations * 2 + (window_size >> 10) + 7) {
+      store_position > n_destinations * 8 + (window_size >> 8) + 7) {
     /*
       The previlus rude expression means n_destinations * 2 + channel capacity.
       Buffers is filled, perform retransmission for the first unacknowledged
@@ -239,6 +239,8 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
   if (data_delivered > data_on_flow) {
     data_delivered = data_on_flow;
   }
+
+#if 0 // This piece of code probably will be removed after testing
   // Limitation here is to avoid overflow of window_size
   if (window_size < INT32_MAX) {
     // Change the window size
@@ -254,6 +256,7 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
       data_on_flow);
 #endif
   }
+#endif
   last_data_on_flow_evaluation = current_time;
   data_on_flow -= data_delivered;
   
@@ -391,6 +394,21 @@ int MulticastSendQueue::acknowledge(uint32_t number, int destination)
       buffer.push_back(swp);
     }
     store_position -= min_to_acknowledge;
+    // Limitation here is to avoid overflow of window_size
+    if (window_size < INT32_MAX) {
+      // Change the window size
+      if (ssthresh == UINT_MAX) {
+        // Slow start
+        window_size += min_to_acknowledge * MAX_UDP_PACKET_SIZE;
+      } else {
+        // Congestion avoidance
+        window_size += (MAX_UDP_PACKET_SIZE * MAX_UDP_PACKET_SIZE *
+          min_to_acknowledge) / window_size;
+      }
+#ifdef DETAILED_MULTICAST_DEBUG
+      DEBUG("New window size is %u (%u)\n", window_size, min_to_acknowledge);
+#endif
+    }
     assert(store_position < INT_MAX);
     if (is_queue_full) {
        SDEBUG("Wake up the sender\n");
@@ -438,10 +456,19 @@ void MulticastSendQueue::adjust_loss_rate(int destination,
       (interval + new_interval * 2);
   } else {
     if (losses[destination].loss_event_rate > 0) {
-      losses[destination].loss_event_rate = rate * (5.0/6.0) +
-        new_rate * (1.0/6.0);
+      losses[destination].loss_event_rate =
+        (rate * interval + new_rate * new_interval * 2) /
+      (interval + new_interval * 2);
     } else {
-      losses[destination].loss_event_rate = new_rate;
+      if (max_loss_event_rate > 0) {
+        interval =
+          losses[destination_with_max_loss_event_rate].measured_interval;
+        losses[destination].loss_event_rate =
+          (max_loss_event_rate * interval + new_rate * new_interval * 2) /
+          (interval + new_interval * 2);
+      } else {
+        losses[destination].loss_event_rate = new_rate;
+      }
     }
   }
 
@@ -659,19 +686,19 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
   	  // FIXME: Check whether this algorithm is appropriate
 #if 0
       if ((unsigned)destination == destination_with_max_loss_event_rate) {
+#endif
         if (number - last_packet_caused_congestion < UINT32_MAX -
             MAX_EXPECTED_WINDOW_SIZE) {
-#endif
-          ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
+          ssthresh = max(data_on_flow / 4, (unsigned)MAX_UDP_PACKET_SIZE * 2);
           window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
 #ifdef DETAILED_MULTICAST_DEBUG
           DEBUG("New window size: %u\n", window_size);
 #endif
-#if 0
           last_packet_caused_congestion = 
             ((MulticastMessageHeader *)buffer[store_position - 1]->message)->get_number() +
             (ssthresh / UDP_MAX_LENGTH);
         }
+#if 0
       }
 #endif
 #if USE_EQUATION_BASED_CONGESTION_CONTROL
