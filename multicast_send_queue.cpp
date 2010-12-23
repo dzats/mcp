@@ -281,8 +281,24 @@ const void* MulticastSendQueue::store_message(const void *message, size_t size,
     }
     DEBUG("Sleep for %u microseconds\n", delay);
     pthread_mutex_unlock(&mutex);
-    // FIXME: more smooth method of waiting can be required here
-    usleep(delay);
+    // FIXME: Check whether this method of waiting is appropriate
+    if (delay < 1000) {
+      struct timeval till_time;
+      gettimeofday(&till_time, NULL);
+      till_time.tv_usec += delay;
+      till_time.tv_sec += till_time.tv_usec / 1000000;
+      till_time.tv_usec = till_time.tv_usec % 1000000;
+      do {
+        if (delay > 66) {
+          sched_yield();
+        }
+        gettimeofday(&current_time, NULL);
+      } while(current_time.tv_sec < till_time.tv_sec ||
+        current_time.tv_sec == till_time.tv_sec &&
+        current_time.tv_usec < till_time.tv_usec);
+    } else {
+      usleep(delay);
+    }
     pthread_mutex_lock(&mutex);
   }
 
