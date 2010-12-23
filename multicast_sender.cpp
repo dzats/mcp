@@ -801,7 +801,8 @@ const std::vector<Destination>* MulticastSender::session_init(
 #ifndef NDEBUG
             uint32_t source_ip = htonl(rh->get_address());
             char source_addr[INET_ADDRSTRLEN];
-            DEBUG("Error %u received from %s\n", rh->get_status(),
+            DEBUG("Error %u(%s) received from %s\n", rh->get_status(),
+              get_reply_status_description(rh->get_status()),
               inet_ntop(AF_INET, &source_ip, source_addr, sizeof(source_addr)));
 #endif
             if (find(hr_begin, hr_end, hr_p) != hr_end) {

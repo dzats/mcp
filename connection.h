@@ -409,4 +409,7 @@ void send_server_is_busy(int sock, uint32_t addr);
 int get_local_addresses(int sock, std::vector<uint32_t> *addresses,
   std::vector<uint32_t> *masks);
 
+// Return a text string describing particular reply message status
+const char* get_reply_status_description(uint8_t status);
+
 #endif

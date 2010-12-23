@@ -144,7 +144,7 @@ int get_local_addresses(int sock, vector<uint32_t> *addresses,
   DEBUG("Number of interfaces: %d(%zu)\n", ifc.ifc_len, sizeof(struct ifreq));
 #else
   DEBUG("Number of interfaces: %d(%zu)\n",
-		ifc.ifc_len / sizeof(struct ifreq), sizeof(struct ifreq));
+    ifc.ifc_len / sizeof(struct ifreq), sizeof(struct ifreq));
 #endif
   for (uint8_t *ptr = (uint8_t *)ifc.ifc_req;
       ptr < (uint8_t *)ifc.ifc_req + ifc.ifc_len;) {
@@ -197,4 +197,37 @@ int get_local_addresses(int sock, vector<uint32_t> *addresses,
   }
   free(ifc.ifc_req);
   return 0;
+}
+
+// Return a text string describing particular reply message status
+const char* get_reply_status_description(uint8_t status)
+{
+// Statuses of the reply messages used in the unicast transmission
+  switch (status) {
+    case STATUS_OK:
+      return "OK";
+    case STATUS_INCORRECT_CHECKSUM:
+      return "Incorrenct checksum";
+    case STATUS_NOT_FATAL_DISK_ERROR:
+      return "Disk error (not fatal)";
+    case STATUS_UNICAST_INIT_ERROR:
+      return "Unicast initialization failed";
+    case STATUS_MULTICAST_INIT_ERROR:
+      return "Multicast initialization failed";
+    case STATUS_UNICAST_CONNECTION_ERROR:
+      return "Unicast connection broken";
+    case STATUS_MULTICAST_CONNECTION_ERROR:
+      return "Multicast connection broken";
+    case STATUS_TOO_MANY_RETRANSMISSIONS:
+      return "Too many retransmissions";
+    case STATUS_FATAL_DISK_ERROR:
+      return "Fatal disk error";
+    case STATUS_SERVER_IS_BUSY:
+      return "Server is busy";
+    case STATUS_PORT_IN_USE:
+      return "Ephemeral port is already in use";
+    case STATUS_UNKNOWN_ERROR:
+    default:
+      return "Unknown error";
+  }
 }
