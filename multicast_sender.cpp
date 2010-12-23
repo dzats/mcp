@@ -347,22 +347,28 @@ void MulticastSender::mcast_send(const void *message,
 	gettimeofday(&current_time, NULL);
 	struct timespec next_retrans_time;
 	TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-	// FIXME: use a constant here
-	next_retrans_time.tv_sec += 1;
+	unsigned from_position = 0;
 	while (send_queue->store_message(message, size, &next_retrans_time) !=
 			0) {
 		size_t size;
-		void *message = send_queue->get_first_unacknowledged_message(&size);
+		void *message = send_queue->get_unacknowledged_message(&size,
+			&from_position);
 		if (message != NULL) {
 			DEBUG("Retransmit message %u\n",
 				((MulticastMessageHeader *)message)->get_number());
 			udp_send(message, size, flags);
+		} else {
+			// All the retransmissions done, wait for the replies, than restart
+			// the retransmissions
+			gettimeofday(&current_time, NULL);
+			TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
+			// FIXME: use a constant here 
+			next_retrans_time.tv_nsec += 200000000;
+			if (next_retrans_time.tv_nsec >= 1000000000) {
+				next_retrans_time.tv_nsec = next_retrans_time.tv_nsec % 1000000000;
+				next_retrans_time.tv_sec += 1;
+			}
 		}
-
-		gettimeofday(&current_time, NULL);
-		TIMEVAL_TO_TIMESPEC(&current_time, &next_retrans_time);
-		// FIXME: use a constant here
-		next_retrans_time.tv_sec += 1;
 	}
 	udp_send(message, size, flags);
 }

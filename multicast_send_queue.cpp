@@ -183,16 +183,15 @@ int MulticastSendQueue::wait_for_destinations(const struct timespec *timeout) {
 	return 0;
 }
 
-// Get the first message that has not been acknowledged. Returns NULL if
-// there is no such message
-// FIXME: untested
-void* MulticastSendQueue::get_first_unacknowledged_message(size_t *size) {
+// Get the first message (starting from 'from_position' in the queue) that
+// has not been acknowledged. Returns NULL if there is no such message
+void* MulticastSendQueue::get_unacknowledged_message(size_t *size,
+		unsigned *from_position) {
 	pthread_mutex_lock(&_mutex);
-	for (unsigned i = 0; i < store_position; ++i) {
+	for (unsigned i = *from_position; i < store_position; ++i) {
 		MulticastMessageHeader *mmh =
 			((MulticastMessageHeader *)buffer[i]->message);
 		if (mmh->get_responder() != MULTICAST_UNEXISTING_RESPONDER) {
-			// FIXME: use lower_bound here
 			uint32_t *t = lower_bound(target_addresses,
 				target_addresses + n_destinations, mmh->get_responder());
 			if (t != target_addresses + n_destinations &&
@@ -201,10 +200,13 @@ void* MulticastSendQueue::get_first_unacknowledged_message(size_t *size) {
 				*size = buffer[i]->size;
 				register void *message = buffer[i]->message;
 				pthread_mutex_unlock(&_mutex);
+				// The next search should start whith the next position
+				*from_position = i + 1;
 				return message;
 			}
 		}
 	}
 	pthread_mutex_unlock(&_mutex);
+	*from_position = 0;
 	return NULL;
 }

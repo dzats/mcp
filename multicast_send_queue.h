@@ -70,9 +70,9 @@ public:
 		return message;
 	}
 
-	// Get the first message that has not been acknowledged. Returns NULL if
-	// there is no such message
-	void *get_first_unacknowledged_message(size_t *size);
+	// Get the first message (starting from 'from_position' in the queue) that
+	// has not been acknowledged. Returns NULL if there is no such message
+	void* get_unacknowledged_message(size_t *size, unsigned *from_position);
 
 	void lock_queue() {
 		pthread_mutex_lock(&_mutex);
