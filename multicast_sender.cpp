@@ -170,16 +170,23 @@ void MulticastSender::multicast_delivery_control()
             dest.sin_family = AF_INET;
             dest.sin_addr = client_addr.sin_addr;
             dest.sin_port = target_address.sin_port;
-            // FIXME: change sendto to something more general
+
+            // Send reply to the destination
             int sendto_result;
             do {
               sendto_result = sendto(sock, &reply, sizeof(reply), 0,
                 (struct sockaddr *)&dest, sizeof(dest));
             } while (sendto_result < 0 && errno == ENOBUFS);
             if (sendto_result < 0) {
-              ERROR("sendto error: %s\n", strerror(errno));
-              abort();
+              // Some internal error occurred
+              ERROR("Can't send a UDP datagram: %s\n", strerror(errno));
+              register_error(STATUS_MULTICAST_CONNECTION_ERROR,
+                "Can't send a UDP datagram: %s", strerror(errno));
+              send_queue->register_fatal_error();
+              abnormal_termination();
+              pthread_exit(NULL);
             }
+
             if (received_errors.find(em) == received_errors.end()) {
               SDEBUG("Add the message into the error queue\n");
               received_errors.insert(em);
@@ -223,8 +230,13 @@ void MulticastSender::multicast_delivery_control()
       SDEBUG("Corrupted datagram received\n");
       continue;
     } else {
+      // Some internal error occurred
       ERROR("recvfrom returned: %s\n", strerror(errno));
-      abort(); // FIXME: change this behavior
+      register_error(STATUS_MULTICAST_CONNECTION_ERROR,
+        "recvfrom returned: %s", strerror(errno));
+      send_queue->register_fatal_error();
+      abnormal_termination();
+      pthread_exit(NULL);
     }
   }
 }
@@ -707,10 +719,16 @@ int MulticastSender::session()
       if (length > MAX_UDP_PACKET_SIZE - sizeof(MulticastMessageHeader)) {
 #ifdef HAS_TR1_MEMORY
         ERROR("Filename %s is too long\n", targets[i].filename.get());
+        register_error(STATUS_UNKNOWN_ERROR,
+          "Filename %s is too long", targets[i].filename.get());
 #else
         ERROR("Filename %s is too long\n", targets[i].filename);
+        register_error(STATUS_UNKNOWN_ERROR,
+          "Filename %s is too long", targets[i].filename);
 #endif
-        abort();
+        pthread_cancel(multicast_delivery_thread);
+        //pthread_join(multicast_delivery_thread, NULL)
+        return -1;
       }
       if (t_curr + length >= t_end) {
         // Send the message

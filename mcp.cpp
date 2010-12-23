@@ -20,8 +20,6 @@
 #include <algorithm>
 #include <sys/param.h> // for MAXPATHLEN
 
-using namespace std;
-
 #include "md5.h"
 #include "destination.h"
 #include "connection.h"
@@ -33,6 +31,9 @@ using namespace std;
 
 #define MAX_RETRANSMISSIONS 3
 
+using namespace std;
+
+// Print usage information and exit
 void usage_and_exit(char *name)
 {
   printf("Usage:\n");
@@ -63,7 +64,7 @@ void *unicast_sender_routine(void *args)
   SDEBUG("Start the unicast sender\n");
   UnicastSender *us = (UnicastSender *)args;
   if (us->session() != 0) {
-    // Signal about an error
+    // Report about an error
     return (void *)-1;
   }
   return NULL;

@@ -53,9 +53,11 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       throw ConnectionException(errno);
     }
     if (p.revents & POLLPRI) {
+      SDEBUG("Priority band data received\n");
       // Try to get the out of band data
       uint8_t oob_data;
-      count = recv(sock, &oob_data, sizeof(oob_data), MSG_OOB | MSG_DONTWAIT);
+      int count = recv(sock, &oob_data, sizeof(oob_data),
+        MSG_OOB | MSG_DONTWAIT);
       if (count > 0) {
         // the out-of-band data has been received
         if (oob_data == (uint8_t)OOB_FILE_SIZE_CHANGED) {
@@ -78,14 +80,25 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
           DEBUG("Unexpected Out-of-Band data received: %d\n", oob_data);
           continue;
         }
-      } else if (errno != EAGAIN) {
-        // An error occurred
-        DEBUG("Socket read error on %s: %s\n", filename, strerror(errno));
+      } else {
+        if (errno == EAGAIN) {
+          SDEBUG("Out of band data is not ready\n");
+        } else if (errno == EINVAL) {
+          SDEBUG("recv returned EINVAL\n");
+          if ((p.revents & POLLIN) == 0) {
+            // Normal data is not ready too
+            continue;
+          }
+        } else {
+          // An error occurred
+          DEBUG("Socket read error on %s: (%u)%s\n", filename, errno,
+            strerror(errno));
 #if 0
-        register_error(STATUS_UNICAST_CONNECTION_ERROR,
-          "Socket read error on %s: %s", filename, strerror(errno));
+          register_error(STATUS_UNICAST_CONNECTION_ERROR,
+            "Socket read error on %s: %s", filename, strerror(errno));
 #endif
-        throw ConnectionException(errno);
+          throw ConnectionException(errno);
+        }
       }
     }
 
@@ -114,8 +127,8 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
       throw ConnectionException(ConnectionException::unexpected_end_of_input);
     } else {
       // An error occurred
-#if 0
       DEBUG("Socket read error on %s: %s\n", filename, strerror(errno));
+#if 0
       register_error(STATUS_UNICAST_CONNECTION_ERROR,
         "Socket read error on %s: %s", filename, strerror(errno));
 #endif

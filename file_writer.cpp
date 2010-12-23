@@ -63,7 +63,7 @@ int FileWriter::write_to_file(int fd)
     count = get_data();
     count = std::min(count, 16384);
   }
-  DEBUG("write_to_file: %d bytes wrote\n", total);
+  DEBUG("write_to_file: %llu bytes wrote\n", (long long unsigned)total);
   return 0;
 }
 

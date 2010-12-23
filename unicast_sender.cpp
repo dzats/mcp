@@ -341,6 +341,8 @@ int UnicastSender::session()
             do {
               recvn(sock, &n_bytes_delivered, sizeof(n_bytes_delivered));
               n_bytes_delivered = ntoh64(n_bytes_delivered);
+              DEBUG("N bytes delivered: %llu\n",
+                (long long unsigned)n_bytes_delivered);
             } while (n_bytes_delivered != write_result);
             // Send the trailing character OOB character
             static const uint8_t final = OOB_FILE_TRANSMISSION_DONE;

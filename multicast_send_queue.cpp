@@ -434,7 +434,7 @@ void MulticastSendQueue::add_missed_packets(uint32_t number,
         UINT32_MAX - MAX_EXPECTED_WINDOW_SIZE) {
 #endif
       ssthresh = max(data_on_flow / 2, (unsigned)MAX_UDP_PACKET_SIZE * 2);
-      window_size = ssthresh + (ssthresh >> 1) + MAX_UDP_PACKET_SIZE * 3;
+      window_size = ssthresh + MAX_UDP_PACKET_SIZE * 3;
       DEBUG("New window size: %u\n", window_size);
 #if 0
       last_packet_caused_congestion = 

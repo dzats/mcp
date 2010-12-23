@@ -32,7 +32,6 @@ public:
       free(path);
     }
   }
-
   
   // Establishes the network session from the TCP connection 'sock'
   int session_init(int sock);

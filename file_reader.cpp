@@ -87,6 +87,14 @@ int FileReader::read_from_file(int fd, off_t size)
       checksum.update((unsigned char *)rposition(), count);
       update_reader_position(count);
       size -= count;
+#if 0
+#ifndef NDEBUG
+      if (size < 65535) {
+        checksum.final();
+        return 0;
+      }
+#endif
+#endif
 #ifdef BUFFER_DEBUG
       DEBUG("%d (%lu) bytes of data read\n", count, size);
 #endif
