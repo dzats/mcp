@@ -86,6 +86,7 @@ void UnicastReceiver::read_from_socket(const char *filename, uint64_t size)
           SDEBUG("Out of band data is not ready\n");
         } else if (errno == EINVAL) {
           flags |= MSG_DONTWAIT;
+          usleep(200000);
           SDEBUG("recv returned EINVAL\n");
         } else {
           // An error occurred
