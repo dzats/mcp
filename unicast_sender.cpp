@@ -26,6 +26,17 @@ void UnicastSender::connect_to(in_addr_t addr) {
 		sock = -1;
 		throw ConnectionException(errno);
 	}
+
+	int buffsize = 66608;
+	// This is work around some FreeBSD kernel bug in the sockatmark function.
+	// The buffer size should be greater that 65536 bytes.
+	// FIXME: don't shure that this is correct solution.
+	if (setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffsize,
+			sizeof(buffsize)) != 0) {
+		DEBUG("setsockopt error: %s\n", strerror(errno));
+		perror("setsockopt error");
+		throw ConnectionException(errno);
+	}
 }
 
 void UnicastSender::send_initial_record(int nsources, char *path,

@@ -3,8 +3,8 @@ UNCOMMON_OBJECTS = mcp.o mcpd.o
 
 DEP_FILES = $(COMMON_OBJECTS:.o=.d) $(UNCOMMON_OBJECTS:.o=.d)
 
-CXXFLAGS += -ggdb -Wall
-#CXXFLAGS += -DNDEBUG
+#CXXFLAGS += -ggdb -Wall
+CXXFLAGS += -DNDEBUG -O2
 
 PROGRAMS = mcp mcpd
 
