@@ -698,8 +698,8 @@ int MulticastSender::session_init(
     MulticastMessageHeader(MULTICAST_INIT_REQUEST, session_id);
 
   // Fill up the message data
-  MulticastInitData *mid = new(mmh + 1) MulticastInitData(PROTOCOL_VERSION,
-    ntohl(ephemeral_addr));
+  MulticastInitData *mid =
+    new(mmh + 1) MulticastInitData(ntohl(ephemeral_addr));
 
   // Fill up the host records
   MulticastHostRecord *hr = (MulticastHostRecord *)(mid + 1);

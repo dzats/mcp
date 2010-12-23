@@ -36,8 +36,10 @@
 #define UINT32_MAX 0xffffffff
 #endif
 
-#define PROTOCOL_VERSION 0x02 // Version of the binary protocol. Not
-  // completely implemented yet.
+#define UNICAST_VERSION_AND_UNUSED 0x02000000U // Version of
+  // the unicast transfer protocol (8 bit).
+#define MULTICAST_VERSION_AND_UNUSED 0x02000000U // Version of
+  // the multicast transfer protocol (8 bit).
 
 // Some configurational constants
 #define UNICAST_PORT 6879 // default TCP port used for the unicast connections
@@ -106,6 +108,7 @@
 struct UnicastSessionHeader
 {
 private:
+  uint32_t version_and_unused; // 8-bit protocol version + 24-bit unused
   uint32_t flags; // configuration flags (currrently unused)
   uint32_t n_sources; // temporary unused field
   uint32_t path_length; // length of the target path
@@ -114,23 +117,23 @@ public:
   UnicastSessionHeader(uint32_t flags, uint32_t n_sources,
       uint32_t path_length)
   {
+    this->version_and_unused = htonl(UNICAST_VERSION_AND_UNUSED);
     this->flags = htonl(flags);
     this->n_sources = htonl(n_sources);
     this->path_length = htonl(path_length);
   }
 
-  uint32_t get_flags()
+  bool check_version() const
   {
-    return ntohl(flags);
+    return ntohl(version_and_unused) >> 24 == UNICAST_VERSION_AND_UNUSED >> 24;
   }
-  uint32_t get_nsources()
+  uint8_t get_version() const
   {
-    return ntohl(n_sources);
+    return (uint8_t)(ntohl(version_and_unused) >> 24);
   }
-  uint32_t get_path_length()
-  {
-    return ntohl(path_length);
-  }
+  uint32_t get_flags() const { return ntohl(flags); }
+  uint32_t get_nsources() const { return ntohl(n_sources); }
+  uint32_t get_path_length() const { return ntohl(path_length); }
 } __attribute__((packed));
 
 // Record for one destination in the unicast session initialization message
@@ -303,12 +306,20 @@ private:
   uint32_t ephemeral_address; // ephemeral multicast address for this
     // particular session
 public:
-  MulticastInitData(uint8_t version, uint32_t address)
+  MulticastInitData(uint32_t address)
   {
-    version_and_unused = htonl(version);
+    version_and_unused = htonl(MULTICAST_VERSION_AND_UNUSED);
     ephemeral_address = htonl(address);
   }
-  uint8_t get_version() const { return (uint8_t)ntohl(version_and_unused); }
+  bool check_version() const
+  {
+    return ntohl(version_and_unused) >> 24 ==
+      MULTICAST_VERSION_AND_UNUSED >> 24;
+  }
+  uint8_t get_version() const
+  {
+    return (uint8_t)(ntohl(version_and_unused) >> 24);
+  }
   uint32_t get_ephemeral_address() const { return ntohl(ephemeral_address); }
 } __attribute__((packed));
 

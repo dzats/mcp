@@ -683,10 +683,10 @@ int main(int argc, char **argv)
         }
 
         MulticastInitData *mid = (MulticastInitData *)(mmh + 1);
-        if (mid->get_version() != PROTOCOL_VERSION) {
+        if (!mid->check_version()) {
           ERROR("Incorrect protocol version %u in the Multicast Init Message, "
             "current version is %u\n", (unsigned)mid->get_version(),
-            PROTOCOL_VERSION);
+            UNICAST_VERSION_AND_UNUSED >> 24);
           continue;
         }
         uint32_t ephemeral_addr = mid->get_ephemeral_address();
