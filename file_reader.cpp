@@ -173,14 +173,7 @@ uint8_t FileReader::handle_file(const char *filename, struct stat *statp,
     return STATUS_FATAL_DISK_ERROR;
   }
   close(fd);
-  uint8_t status = finish_task();
-
-  // Check the result of writers
-  if (status >= STATUS_FIRST_FATAL_ERROR) {
-    // One of the writers finished with a fatal error
-    finish_work();
-  }
-  return status;
+  return finish_task();
 }
 
 // Reads information about the directory 'dirname' and pass it to
@@ -191,11 +184,7 @@ uint8_t FileReader::handle_directory(char *dirname, struct stat *statp,
   FileInfoHeader d_info(resource_is_a_directory,
     statp->st_mode & ~S_IFMT, strlen(dirname), rootdir_basename_offset, 0);
   add_task(d_info, dirname);
-  uint8_t status = finish_task();
-  if (finish_task() >= STATUS_FIRST_FATAL_ERROR) {
-    finish_work();
-  }
-  return status;
+  return finish_task();
 }
 
 // Implements recursive behavior for the directory 'name'.
